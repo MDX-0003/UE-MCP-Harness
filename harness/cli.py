@@ -90,7 +90,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         loop.stop()
-
+    
+    # 当收到 SIGINT/SIGTERM 时，把 shutdown() 协程加入循环的待办队列
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(
@@ -101,7 +102,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             # Windows 不支持 add_signal_handler，使用 signal.signal
             pass
 
-    try:
+    try:# 阻塞在这里，直到 run() 完成或循环被 stop()
         loop.run_until_complete(run())
     except KeyboardInterrupt:
         logger.info("用户中断。")
