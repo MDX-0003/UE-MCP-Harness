@@ -34,11 +34,16 @@ def cmd_start(args: argparse.Namespace) -> int:
       1. 加载配置（环境变量 + CLI 覆盖）
       2. 创建 McpClientSession，连接到 UE MCP Server
       3. 预加载所有工具集（optional，由配置控制）
-      4. 构建 mcp Server，注册 list_tools / call_tool
-      5. 通过 SSE transport 启动 HTTP Server
+      4. 初始化拦截器链（003 Logger + DebugPreCall）
+      5. 构建 mcp Server，注册 list_tools / call_tool
+      6. 通过 SSE transport 启动 HTTP Server
     """
+    import uuid
+
     from harness.config import Config
     from harness.client import McpClientSession
+    from harness.interceptor import DebugPreCallInterceptor, ToolCallInterceptor
+    from harness.observability.logger import ToolCallLogger
     from harness.server import build_server
     from harness.transport import serve
 
@@ -56,11 +61,28 @@ def cmd_start(args: argparse.Namespace) -> int:
     # 创建 UE 客户端
     ue_client = McpClientSession(config)
 
+    # 会话 ID：优先用 UE session_id（连通后），否则生成 UUID
+    session_id = str(uuid.uuid4())[:8]
+
     async def run() -> None:
+        nonlocal session_id
+
+        # 003 日志拦截器（在连接前创建，连接后启动以获得真正的 session_id）
+        tool_logger = ToolCallLogger(config.log_dir, session_id)
+        await tool_logger.start()
+
+        interceptors: list[ToolCallInterceptor] = [
+            DebugPreCallInterceptor(),
+            tool_logger,
+        ]
+
         try:
             # 1. 连接 UE
             await ue_client.connect()
             logger.info("✓ 已连接到 UE MCP Server (session: %s)", ue_client.session_id or "无")
+            # 用 UE 真实的 session_id 更新日志文件名
+            if ue_client.session_id:
+                tool_logger._session_id = ue_client.session_id
 
             # 2. 预加载工具集（可配置跳过，用于快速调试）
             if config.preload_all_toolsets:
@@ -71,12 +93,14 @@ def cmd_start(args: argparse.Namespace) -> int:
                 logger.info("✓ 已获取 %d 个工具（跳过预加载）", len(tools))
 
             # 3. 构建并启动 MCP Server
-            server = build_server(config, ue_client)
+            server = build_server(config, ue_client, interceptors)
             await serve(server, host=config.listen_host, port=config.listen_port)
 
         except Exception as e:
             logger.error("启动失败: %s", e)
             raise
+        finally:
+            await tool_logger.stop()
 
     # 信号处理：SIGINT/SIGTERM 优雅关闭
     loop = asyncio.new_event_loop()
@@ -178,12 +202,40 @@ def main() -> int:
         from harness import __version__
         print(f"ue-agent-harness v{__version__}")
         return 0
+    elif args.command == "stats":
+        return _cmd_stats(args)
+    elif args.command == "replay":
+        return _cmd_replay(args)
     elif args.command is None:
         parser.print_help()
         return 0
     else:
         print(f"命令 '{args.command}' 尚未实现。")
         return 1
+
+
+def _cmd_stats(args: argparse.Namespace) -> int:
+    """harness stats 命令 — 读取日志统计。"""
+    from harness.config import Config
+    from harness.observability.stats import cmd_stats
+
+    config = Config.from_env()
+    _setup_logging(config.log_level)
+
+    return cmd_stats(config.log_dir)
+
+
+def _cmd_replay(args: argparse.Namespace) -> int:
+    """harness replay 命令 — 从日志回放工具调用。"""
+    from pathlib import Path
+    from harness.config import Config
+    from harness.observability.replay import cmd_replay
+
+    config = Config.from_env()
+    _setup_logging(config.log_level)
+
+    log_file = Path(args.log_file)
+    return cmd_replay(log_file, ue_port=config.ue_port)
 
 
 if __name__ == "__main__":
