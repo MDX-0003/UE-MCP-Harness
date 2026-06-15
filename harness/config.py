@@ -34,6 +34,22 @@ class Config:
     # 工具预加载
     preload_all_toolsets: bool = True
 
+    # 004 Context Assembly — 自由探索模式工具白名单
+    # 使用短名（toolset 前缀），匹配时检查全限定工具名是否包含任一模式
+    default_tools_allowlist: tuple[str, ...] = (
+        "EditorAppToolset.",
+        "SlateInspector.",
+        "scene.SceneTools.",
+        "actor.ActorTools.",
+        "object.ObjectTools.",
+    )
+
+    # 006 Vision Pipeline — Vision API 配置
+    vision_api_key: str = ""  # 在 .vision.env 中填写
+    vision_api_base_url: str = "https://token-plan-cn.xiaomimimo.com"
+    vision_model: str = "mimo-v2.5-pro"  # 带 vision 能力的模型
+    vision_max_size: tuple[int, int] = (1024, 768)  # 截图 resize 最大尺寸
+
     # 日志
     log_level: str = "INFO"
     log_dir: Path = field(default_factory=lambda: Path.home() / ".ue-harness" / "logs")
@@ -64,6 +80,12 @@ class Config:
             != "false",
             log_level=os.getenv("HARNESS_LOG_LEVEL", "INFO"),
             log_dir=Path(os.getenv("HARNESS_LOG_DIR", str(Path.home() / ".ue-harness" / "logs"))),
+            vision_api_key=os.getenv("HARNESS_VISION_API_KEY", ""),
+            vision_api_base_url=os.getenv(
+                "HARNESS_VISION_API_BASE_URL",
+                "https://token-plan-cn.xiaomimimo.com",
+            ),
+            vision_model=os.getenv("HARNESS_VISION_MODEL", "claude-sonnet-4-6"),
         )
 
     def merge_cli_overrides(
@@ -98,6 +120,10 @@ class Config:
             "preload_all_toolsets": self.preload_all_toolsets,
             "log_level": self.log_level,
             "log_dir": self.log_dir,
+            "default_tools_allowlist": self.default_tools_allowlist,
+            "vision_api_key": self.vision_api_key,
+            "vision_api_base_url": self.vision_api_base_url,
+            "vision_model": self.vision_model,
         }
         current.update(overrides)
         return Config(**current)

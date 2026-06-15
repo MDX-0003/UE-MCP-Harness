@@ -22,6 +22,18 @@
 ## 阻塞
 
 - #002（工具透传——需要 tool call 拦截）
+- #005（Skill 系统——`TaskMemory.pending` 从 Skill YAML `steps` 初值化）
+- #008（State Cache——`StateCacheInterceptor` 追踪 write tool 调用，为 `key_assets` 提供数据源）
+
+## 对 005 的反馈
+
+`TaskMemory` 完成任务后，与 008 的 `StateCacheInterceptor` 记录的 write tool 调用序列结合，可为 005 的 `save_skill` 自动生成 Skill YAML：
+- `TaskMemory.description` → Skill `description`
+- `TaskMemory.completed` + `pending` → Skill `steps`
+- `StateCacheInterceptor` 追踪的 tool 调用 → Skill `tools_allowlist`
+- #006 Vision 验证结果 → Skill `verification`
+
+这是 005 的 B 路径（Harness 自动保存 Skill）的数据源。
 
 ## 设计说明
 

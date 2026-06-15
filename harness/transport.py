@@ -21,16 +21,21 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger("harness.transport")
 
 
-def create_app(server: Server) -> Starlette:
+def create_app(server: Server, instructions: str = "") -> Starlette:
     """创建 Starlette ASGI 应用，挂载 MCP SSE 端点。
 
     Args:
         server: 已配置（注册了 list_tools/call_tool）的 mcp Server 实例。
+        instructions: 初始化时发送给 LLM 的系统指令（可选）。
 
     Returns:
         配置好的 Starlette 应用。
     """
     sse = SseServerTransport("/messages/")
+
+    _init_opts = server.create_initialization_options()
+    if instructions:
+        _init_opts.instructions = instructions
 
     async def handle_sse(request):
         """处理 SSE 连接——每个 LLM 客户端连接对应一个 SSE stream。"""
@@ -42,7 +47,7 @@ def create_app(server: Server) -> Starlette:
             await server.run(
                 streams[0],
                 streams[1],
-                server.create_initialization_options(),
+                _init_opts,
             )
 
     app = Starlette(
@@ -68,6 +73,7 @@ async def serve(
     server: Server,
     host: str = "127.0.0.1",
     port: int = 9000,
+    instructions: str = "",
 ) -> None:
     """启动 Harness MCP Server。
 
@@ -77,8 +83,9 @@ async def serve(
         server: 已配置的 mcp Server 实例。
         host: 监听地址。
         port: 监听端口。
+        instructions: 初始化时发送给 LLM 的系统指令（可选）。
     """
-    app = create_app(server)
+    app = create_app(server, instructions)
 
     config = uvicorn.Config(
         app,
