@@ -194,10 +194,11 @@ def build_server(
           - save_skill:     保存 Skill YAML → skill_registry.save_skill()
         """
 
+        nonlocal _active_skill
+
         # ---- Harness 自有工具 ----
 
         if name == "activate_skill":
-            nonlocal _active_skill
             query = arguments.get("name_or_desc", "")
 
             # 空查询 → 重新扫描目录（感知外部 YAML 变更）
@@ -275,7 +276,6 @@ def build_server(
             return CallToolResult(content=[TextContent(type="text", text=prompt)])
 
         if name == "deactivate_skill":
-            nonlocal _active_skill
             was_active = _active_skill is not None
             _active_skill = None
             if was_active:

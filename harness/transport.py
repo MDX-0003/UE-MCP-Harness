@@ -16,7 +16,7 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
-from starlette.routing import Mount, Route
+from starlette.routing import Route
 
 logger = logging.getLogger("harness.transport")
 
@@ -33,6 +33,7 @@ def create_app(server: Server, instructions: str = "") -> Starlette:
     """
     sse = SseServerTransport("/messages/")
 
+    # 构建初始化选项，注入系统指令
     _init_opts = server.create_initialization_options()
     if instructions:
         _init_opts.instructions = instructions
@@ -54,7 +55,11 @@ def create_app(server: Server, instructions: str = "") -> Starlette:
         debug=False,
         routes=[
             Route("/sse", endpoint=handle_sse, methods=["GET"]),
-            Mount("/messages/", app=sse.handle_post_message),
+            # 使用 Route + path 通配符代替 Mount——Starlette 1.0 的 Mount
+            # 对 ASGI app 的 POST handler 会错误地包裹 request_response，
+            # 导致 handle_post_message 的 None 返回值被当作 HTTP Response 调用而崩溃
+            Route("/messages/{path:path}", endpoint=sse.handle_post_message, methods=["POST"]),
+            Route("/messages/", endpoint=sse.handle_post_message, methods=["POST"]),
         ],
     )
 

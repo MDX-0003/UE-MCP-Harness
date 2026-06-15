@@ -112,7 +112,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             # 4. 构建并启动 MCP Server
             server = build_server(config, ue_client, interceptors, world_state=_cache)
 
-            # 初始化 instructions：列出可用 Skill + 提示核心工具
+            # 初始化 instructions：列出可用 Skill
             skill_registry = SkillRegistry()
             skill_registry.load_skills()
             skills = skill_registry.list_skills()
@@ -126,8 +126,8 @@ def cmd_start(args: argparse.Namespace) -> int:
                 "调 activate_skill <名称> 激活 Skill，调 deactivate_skill 退出。\n"
                 "调 get_context 获取最新 UE 状态快照和活跃 Skill 进度。"
             )
-
-            await serve(server, host=config.listen_host, port=config.listen_port, instructions=instructions)
+            await serve(server, host=config.listen_host, port=config.listen_port,
+                       instructions=instructions)
 
         except Exception as e:
             logger.error("启动失败: %s", e)
