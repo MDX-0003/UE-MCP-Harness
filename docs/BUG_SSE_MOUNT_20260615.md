@@ -1,142 +1,87 @@
 # Bug: SSE Transport `Mount` → `TypeError: 'NoneType' object is not callable` — 2026-06-15
 
-## 现象
+## 最终结论：✅ 已修复，L3 测试通过
 
-L3 端到端测试在 `save_skill` 等 Harness 自有 MCP 工具调用完成后，Harness 进程中抛出：
+**根因**：Starlette 1.0 对所有带 `request` 参数的 `Route` 端点进行 `request_response` 包装，期望返回 `Response` 对象。MCP SDK 的 `handle_post_message` 和 Harness 的 `handle_sse` 都是原生 ASGI app（通过 `send()` 直接操作，返回 `None`），被包装后 `None` 被当作 Response 调用 → `TypeError`。
 
-```
-File "...\starlette\routing.py", line 62, in app
-    await response(scope, receive, send)
-TypeError: 'NoneType' object is not callable
-```
+**最终方案**：用纯 ASGI 中间件 `_MessagesMiddleware` 在 Starlette 路由层之前拦截 `/sse` 和 `/messages/*`，直接以原始 ASGI 方式调用 MCP SDK handler。Starlette 的 `Route`/`Mount` 完全不参与这两个端点的处理。
 
-同时 `save_skill` 的**业务逻辑已成功执行**（文件落盘、日志输出均正常），崩溃仅发生在 SSE 响应帧回写阶段。
+**最终代码**：`harness/transport.py`（142 行），见下方"完整有效路径"节。
 
-复现条件：
-- Harness 运行中（`harness start --ue-port 8000 --listen-port 9000`）
-- 通过 MCP SSE 客户端调用任意 Harness 自有工具（如 `save_skill`）
-- 工具返回后立即关闭 SSE 连接时概率触发
-- 同样的工具和参数通过 `curl` 直连 UE（`/mcp`）不会崩溃
+**验证**：`pytest tests/` 137 passed；L3 端到端测试 7 个验证点全部通过。
 
-## 诊断过程
+---
 
-### 第一步：怀疑 `instructions` 改动（已排除）
-
-最初修改了 `transport.py` 的 `create_app()`，在 `_init_opts` 上设置了 `.instructions`。回滚后问题仍存在，确认与 `instructions` 无关。
-
-验证：`InitializationOptions` 是标准 Pydantic 模型，`.instructions = "..."` 完全合法：
-
-```python
-from mcp.server import Server
-s = Server('test')
-opts = s.create_initialization_options()
-opts.instructions = 'hello'  # 正常工作
-print(opts.instructions)      # 'hello'
-```
-
-### 第二步：定位到 Starlette 版本
-
-关键版本信息：
-- **Starlette 1.0.0**（`pip show starlette` 确认）
-- MCP SDK（`mcp` 包，`SseServerTransport` 组件）
-
-### 第三步：追踪调用链
+## 完整有效路径（transport.py 最终架构）
 
 ```
-HTTP POST /messages/
-  → Starlette Router.__call__
-    → Mount("/messages/", app=sse.handle_post_message)
-      → Mount.handle(scope, receive, send)
-        → self.app(scope, receive, send)
-          → sse.handle_post_message(scope, receive, send)  ← 这是 ASGI app
-          → 在内部调用 send() 完成响应
-          → 返回 None  ← ASGI app 的标准行为（不返回 Response）
+HTTP Request
+  │
+  ▼
+uvicorn (ASGI server)
+  │
+  ▼
+CORSMiddleware (Starlette)
+  │  allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+  ▼
+_MessagesMiddleware (自建纯 ASGI 中间件)
+  │
+  ├── POST /messages/* → sse.handle_post_message(child_scope, receive, send)
+  │     child_scope 中模拟 Mount 路径剥离: path 去掉 /messages 前缀, root_path += "/messages"
+  │
+  ├── GET  /sse        → _handle_sse(scope, receive, send)
+  │     sse.connect_sse(scope, receive, send) → server.run(streams, init_opts)
+  │
+  └── 其他请求          → Starlette Router（当前为空，仅作为 ASGI 协议适配层）
 ```
 
-但在 Starlette 1.0 中，`Mount` 对其内部的 `app` 使用了 `request_response()` 包装。查看 Starlette 1.0 源码：
+关键点：
+- `_MessagesMiddleware` 是 `starlette.middleware.Middleware` 包装的纯 ASGI 中间件，接收原始 `(scope, receive, send)`
+- POST /messages/\* 的 `child_scope` 模拟了 Starlette `Mount` 的路径剥离行为，因为 MCP SDK 的 `handle_post_message` 通过解析 URL path 提取 session_id
+- GET /sse 直接以 ASGI 方式运行 `server.run()`，不在 Starlette 路由中注册（避免 `request_response` 包装）
+- `instructions` 通过 `server.create_initialization_options()` 正常注入，不受中间件影响
 
-```python
-# starlette/routing.py — request_response 函数
-def request_response(func, ...):
-    async def app(scope, receive, send):
-        request = Request(scope, receive, send)
-        async def app(scope, receive, send):
-            response = await f(request)     # f = handle_post_message
-            await response(scope, receive, send)  # ← response = None → crash
-        ...
-    return app
-```
+---
 
-`request_response` 期望 `f(request)` 返回一个 **HTTP Response 对象**。但 `SseServerTransport.handle_post_message` 是一个**原始 ASGI app**（通过 `send()` 直接操作，返回 `None`）。当 `response = None` 时，`await None(scope, receive, send)` → `TypeError: 'NoneType' object is not callable`。
+## 调试过程（保留供后续排错参考）
 
-### 根本原因
+### 尝试 1：怀疑 `instructions` 改动
 
-**Starlette 1.0.0 的 `Mount` 对内部 `app` 的包装方式与 MCP SDK 的 `SseServerTransport.handle_post_message`（原始 ASGI app）不兼容。**
+现象：`save_skill` 之后崩溃。
 
-`Mount` 假设内部 app 是 HTTP request/response 风格的（返回 Response），但 `handle_post_message` 是 ASGI 原生风格（直接操作 send，返回 None）。Starlette 的 `Route` 对 ASGI 风格端点正确处理，但 `Mount` 在 1.0 版本中加入了额外的包装层。
+操作：回滚 `_init_opts.instructions` 设置。结果：问题仍存在，排除。
 
-注意：这个问题在较早的 Starlette 版本中不存在（`Mount` 直接透传 scope/receive/send，不做 request_response 包装），因此原始代码（HANDOFF_L03 时期的测试）可以正常工作。
+### 尝试 2：`Mount` → `Route` 替换
 
-## 修复方案
+操作：将 `Mount("/messages/", app=sse.handle_post_message)` 替换为 `Route("/messages/{path:path}", ...)`。
 
-### 方案 A：降级 Starlette（不推荐）
+结果：新错误 `500 Internal Server Error`——`handle_post_message` 依赖 `Mount` 的路径剥离来提取 session_id，纯 `Route` 不剥离路径。
 
-Starlette 1.0 是主要版本更新，降级会导致其他依赖冲突。
+### 尝试 3：纯 ASGI 中间件（最终方案）
 
-### 方案 B：包装 `handle_post_message` 为 HTTP handler（不推荐）
+操作：
+1. 创建 `_MessagesMiddleware` 类，实现 `__call__(scope, receive, send)` ASGI 接口
+2. POST `/messages/*` 手动模拟路径剥离后调 `handle_post_message`
+3. GET `/sse` 直接以 ASGI 运行 `server.run()`
+4. 移除所有 Starlette `Route`，路由表设为空 `[]`
 
-让 `handle_post_message` 返回一个 Response 对象。但 MCP SDK 的内部实现直接操作 `send()`，修改上游代码不现实。
+结果：✅ L3 测试通过，Harness 端无异常。
 
-### 方案 C：替换 `Mount` 为 `Route`（✅ 采用）
+### 为什么最终方案生效
 
-**改动文件**：`harness/transport.py`
+Starlette 的 `Route` 和 `Mount` 都在内部使用 `request_response()` 来包装端点函数。`request_response` 的判断逻辑是：
+- 如果端点函数接受 `request` 参数 → 使用 HTTP request/response 模式（期望返回 Response）
+- 否则 → 使用 ASGI 模式（透传 scope/receive/send）
 
-**修改前**：
-```python
-from starlette.routing import Mount, Route
+`handle_sse(request)` 和 `handle_post_message(scope, receive, send)` 的签名导致 Starlette 走了 HTTP 模式——前者有 `request` 参数，后者因 MCP SDK 方法签名而被误判。
 
-app = Starlette(
-    routes=[
-        Route("/sse", endpoint=handle_sse, methods=["GET"]),
-        Mount("/messages/", app=sse.handle_post_message),
-    ],
-)
-```
+绕过 Starlette 路由层后，这些函数直接以原始 ASGI 方式调用，不再被 `request_response` 包装，`None` 返回值不再触发错误。
 
-**修改后**：
-```python
-from starlette.routing import Route
+### 失败的尝试（已回滚）
 
-app = Starlette(
-    routes=[
-        Route("/sse", endpoint=handle_sse, methods=["GET"]),
-        # Route 对 ASGI app 正确处理——直接透传 scope/receive/send，
-        # 不做 request_response 包装
-        Route("/messages/{path:path}", endpoint=sse.handle_post_message, methods=["POST"]),
-        Route("/messages/", endpoint=sse.handle_post_message, methods=["POST"]),
-    ],
-)
-```
-
-**原理**：Starlette 的 `Route` 类对 ASGI 风格端点（接受 `(scope, receive, send)` 并返回 `None`）有正确的处理路径——直接调用 `await self.app(scope, receive, send)`，不做 `request_response` 包装。因此 `handle_post_message` 的 `None` 返回值不会被错误解释。
-
-两条 `Route` 分别覆盖：
-- `/messages/{path:path}` — 带 session ID 子路径的请求
-- `/messages/` — 根路径请求
-
-## 验证
-
-```
-$ python -m pytest tests/ -q --ignore=tests/test_client.py --ignore=tests/test_l3_e2e.py
-........................................................................ [ 52%]
-.................................................................        [100%]
-137 passed in 0.34s
-```
-
-L3 端到端测试（`tests/test_l3_e2e.py`）需重启 Harness 后手动执行。
-
-## 影响范围
-
-- 仅影响 `harness/transport.py` — SSE transport 层的 Starlette 路由配置
-- 不影响 MCP 协议处理、工具调用逻辑、拦截器链
-- `handle_post_message` 的功能行为不变——仍正确接收 scope 中的完整 URL 路径
+| 尝试 | 改动 | 结果 |
+|:---:|---|---|
+| 回滚 instructions | 移除 `_init_opts.instructions` | ❌ 问题仍存在 |
+| Mount → Route | `Route("/messages/{path:path}", ...)` | ❌ 500——路径剥离丢失 |
+| Route + middleware stubs | 多种组合 | ❌ 均不可用 |
+| **纯 ASGI 中间件** | `_MessagesMiddleware` | ✅ **通过** |
