@@ -2,6 +2,7 @@
 
 用法:
     harness start [--ue-port PORT] [--listen-port PORT]
+    harness start --ue-port 8000 --listen-port 9000
     harness version
     harness skill create|list|delete|update <name>
     harness safety rules list|add|remove
@@ -50,6 +51,13 @@ def cmd_start(args: argparse.Namespace) -> int:
     from harness.state.models import WorldState
     from harness.state.refresher import full_refresh
     from harness.transport import serve
+    from harness.verification.config import load_vision_env
+    from harness.verification.vision_agent import VisionSubAgent
+    from harness.verification.interceptor import VisionInterceptor
+    from harness.observability.snapshotter import SnapshotRecorder
+
+    # 加载 Vision 配置（.vision.env）
+    load_vision_env()
 
     config = Config.from_env().merge_cli_overrides(
         ue_port=args.ue_port,
@@ -71,28 +79,45 @@ def cmd_start(args: argparse.Namespace) -> int:
     # 008 State Cache — 全局共享的 WorldState 实例
     _cache = WorldState()
 
+    # 007 验证闭环 — 活跃 Skill 引用（build_server 内 update，VisionInterceptor 读取）
+    _active_skill_ref: list[dict | None] = [None]
+
     async def run() -> None:
         nonlocal session_id
 
-        # 003 日志拦截器（在连接前创建，连接后启动以获得真正的 session_id）
-        tool_logger = ToolCallLogger(config.log_dir, session_id)
-        await tool_logger.start()
+        tool_logger = None
+        snapshot_recorder = None
 
-        # 008 缓存拦截器
+        # 008 缓存拦截器（无 session 依赖，可提前创建）
         cache_interceptor = StateCacheInterceptor(_cache)
 
-        interceptors: list[ToolCallInterceptor] = [
-            DebugPreCallInterceptor(),
-            tool_logger,
-            cache_interceptor,
-        ]
+        # 007 视觉验证拦截器（无 session 依赖）
+        vision_agent = VisionSubAgent(config)
+        vision_interceptor = VisionInterceptor(
+            vision_agent, _cache,
+            get_active_skill=lambda: _active_skill_ref[0],
+        )
 
         try:
-            # 1. 连接 UE
+            # 1. 连接 UE → 获取真实 session_id，失败则回退到短 UUID
             await ue_client.connect()
             logger.info("✓ 已连接到 UE MCP Server (session: %s)", ue_client.session_id or "无")
-            if ue_client.session_id:
-                tool_logger._session_id = ue_client.session_id
+            session_id = ue_client.session_id or session_id
+
+            # 2. 用真实 session_id 创建日志和快照记录器
+            tool_logger = ToolCallLogger(config.log_dir, session_id)
+            await tool_logger.start()
+
+            snapshot_dir = config.log_dir / session_id
+            snapshot_recorder = SnapshotRecorder(snapshot_dir, _cache)
+
+            interceptors: list[ToolCallInterceptor] = [
+                DebugPreCallInterceptor(),
+                tool_logger,
+                cache_interceptor,
+                vision_interceptor,
+                snapshot_recorder,
+            ]
 
             # 2. 预加载工具集（可配置跳过，用于快速调试）
             if config.preload_all_toolsets:
@@ -110,7 +135,9 @@ def cmd_start(args: argparse.Namespace) -> int:
                 logger.warning("L3 刷新失败（非致命）: %s", e)
 
             # 4. 构建并启动 MCP Server
-            server = build_server(config, ue_client, interceptors, world_state=_cache)
+            server = build_server(config, ue_client, interceptors,
+                                  world_state=_cache, skill_ref=_active_skill_ref,
+                                  snapshot_recorder=snapshot_recorder)
 
             # 初始化 instructions：列出可用 Skill
             skill_registry = SkillRegistry()
@@ -133,7 +160,10 @@ def cmd_start(args: argparse.Namespace) -> int:
             logger.error("启动失败: %s", e)
             raise
         finally:
-            await tool_logger.stop()
+            if snapshot_recorder is not None:
+                snapshot_recorder.write_session_json()
+            if tool_logger is not None:
+                await tool_logger.stop()
 
     # 信号处理：SIGINT/SIGTERM 优雅关闭
     loop = asyncio.new_event_loop()

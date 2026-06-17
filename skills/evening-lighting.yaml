@@ -10,24 +10,24 @@ triggers:
 tools_allowlist:
   - "SceneTools.find_actors"
   - "SceneTools.get_current_level"
+  - "SceneTools.add_to_scene_from_class"
   - "ActorTools.get_actor_transform"
   - "ActorTools.set_actor_transform"
   - "ObjectTools.list_properties"
   - "ObjectTools.get_properties"
   - "ObjectTools.set_properties"
-  - "SlateInspector.Screenshot"
   - "EditorAppToolset.CaptureEditorImage"
   - "EditorAppToolset.GetCameraTransform"
 steps: |
-  1. 调 SceneTools.find_actors(glob="*DirectionalLight*") 找到场景中所有的 DirectionalLight Actor
+  1. 调 SceneTools.find_actors(glob="*DirectionalLight*", tag="") 找到场景中所有的 DirectionalLight Actor
   2. 调 ActorTools.get_actor_transform(主光) 获取当前变换
   3. 调 ObjectTools.list_properties(主光) 了解可调整的光照属性
   4. 将主 DirectionalLight 的旋转角度调整为低角度（Pitch 接近 -70 到 -80 度，模拟日落前 10-20 度的地平线高度）
   5. 获取当前光照属性 → 设置 LightColor 为暖色（色温约 3000-4000K 对应 RGB ~(1.0, 0.7, 0.4)）
   6. 将 Intensity 降低到默认值的 30-50%
-  7. 找到 SkyLight → 降低其 Intensity
-  8. 考虑添加 PostProcessVolume 并设置 ColorGrading 暖色调（如果场景中没有）
-  9. 调 SlateInspector.Screenshot 截图当前视口
+  7. 调 SceneTools.find_actors(glob="*SkyLight*", tag="") 找到 SkyLight → 降低其 Intensity
+  8. 如场景中没有 PostProcessVolume，可调 SceneTools.add_to_scene_from_class(actor_type="PostProcessVolume") 添加并设置 ColorGrading 暖色调
+  9. 调 EditorAppToolset.CaptureAssetImage(assetPath="", bShowUI=false) 截图当前视口
   10. 视觉验证：场景应具有温暖的低角度光照和长阴影
 
 verification:

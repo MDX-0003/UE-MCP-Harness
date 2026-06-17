@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"toolset_registry.toolsets.core.object.ObjectTools.list_properties","arguments":{"instance":{"refPath":"/Temp/Untitled_1.Untitled_1:PersistentLevel.DirectionalLight_UAID_A85E45CFE40401D200_1470382761.LightComponent0"}}}}

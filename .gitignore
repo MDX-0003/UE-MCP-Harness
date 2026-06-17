@@ -49,5 +49,11 @@ Content/MNIST/mnist_train.csv
 Content/*.pt
 
 *.pyc
+__pycache__/
+
+# Harness 本地数据（日志、快照、Skill 缓存）
+
+.ue-harness/
+
 
 

@@ -50,6 +50,8 @@ def build_server(
     interceptors: list[ToolCallInterceptor] | None = None,
     context_providers: list[ContextProvider] | None = None,
     world_state: WorldState | None = None,
+    skill_ref: list[dict | None] | None = None,
+    snapshot_recorder: Any | None = None,
 ) -> Server:
     """构建 MCP Server 实例。
 
@@ -59,6 +61,10 @@ def build_server(
         interceptors: ToolCallInterceptor 列表。
         context_providers: ContextProvider 列表。
         world_state: 共享 WorldState 实例（008 填充，get_context 消费）。
+        skill_ref: 可选的单元素列表，用于向外部暴露当前活跃 Skill。
+                   activate_skill/deactivate_skill 时会同步更新 skill_ref[0]。
+        snapshot_recorder: 可选 SnapshotRecorder，Skill 激活/停用和 get_context
+                          时通知其写入快照文件。
 
     Returns:
         配置好的 mcp Server 实例。
@@ -223,6 +229,10 @@ def build_server(
                 yaml_text = skill_registry.load_skill_yaml(skill.name)
                 if yaml_text:
                     _active_skill = _parse_skill_yaml_to_dict(yaml_text)
+                    if skill_ref is not None:
+                        skill_ref[0] = _active_skill
+                    if snapshot_recorder is not None:
+                        snapshot_recorder.on_skill_activated(skill.name, yaml_text)
                     logger.info("Skill 已激活: %s", skill.name)
                     return CallToolResult(content=[TextContent(
                         type="text",
@@ -278,6 +288,10 @@ def build_server(
         if name == "deactivate_skill":
             was_active = _active_skill is not None
             _active_skill = None
+            if skill_ref is not None:
+                skill_ref[0] = None
+            if snapshot_recorder is not None:
+                snapshot_recorder.on_skill_deactivated()
             if was_active:
                 return CallToolResult(content=[TextContent(
                     type="text", text="已退出 Skill 模式，回到自由探索模式。",

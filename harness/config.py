@@ -52,7 +52,7 @@ class Config:
 
     # 日志
     log_level: str = "INFO"
-    log_dir: Path = field(default_factory=lambda: Path.home() / ".ue-harness" / "logs")
+    log_dir: Path = field(default_factory=lambda: _default_log_dir())
 
     @property
     def ue_base_url(self) -> str:
@@ -79,7 +79,7 @@ class Config:
             ).lower()
             != "false",
             log_level=os.getenv("HARNESS_LOG_LEVEL", "INFO"),
-            log_dir=Path(os.getenv("HARNESS_LOG_DIR", str(Path.home() / ".ue-harness" / "logs"))),
+            log_dir=Path(os.getenv("HARNESS_LOG_DIR", str(_default_log_dir()))),
             vision_api_key=os.getenv("HARNESS_VISION_API_KEY", ""),
             vision_api_base_url=os.getenv(
                 "HARNESS_VISION_API_BASE_URL",
@@ -127,6 +127,11 @@ class Config:
         }
         current.update(overrides)
         return Config(**current)
+
+
+def _default_log_dir() -> Path:
+    """默认日志目录——仓库根目录下的 .ue-harness/logs。"""
+    return Path(__file__).resolve().parent.parent / ".ue-harness" / "logs"
 
 
 def _load_dotenv() -> None:

@@ -54,6 +54,7 @@ class WorldState(BaseModel):
 
     pie_running: bool | None = None       # None = 未知（无直接数据源）
     last_full_refresh: datetime | None = None
+    last_vision_verdict: dict | None = None  # 007 验证闭环：最近一次视觉验证结果
     _needs_refresh: bool = False          # load_level 后标记，触发 L3 刷新
 
 

@@ -1,0 +1,450 @@
+"""测试 VisionInterceptor — 截图工具调用后自动触发 Vision 分析 (Issue 007)
+
+验证 4 个核心场景:
+  1. 截图工具调用 → post_call 触发 Vision 分析
+  2. Vision 结果正确写入 WorldState.last_vision_verdict
+  3. 非截图工具调用 → 不触发 Vision 分析
+  4. Vision 分析失败 → 不影响主流程（error 容忍）
+"""
+
+from __future__ import annotations
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timezone
+
+from harness.interceptor import ToolCallCompleted
+from harness.state.models import WorldState
+from harness.verification.interceptor import VisionInterceptor
+from harness.verification.vision_agent import VisionSubAgent, VisionVerdict
+
+
+# ---- Fixtures ----
+
+@pytest.fixture
+def world_state() -> WorldState:
+    return WorldState()
+
+
+@pytest.fixture
+def mock_vision_agent() -> VisionSubAgent:
+    """创建一个 mock VisionSubAgent，check() 返回预设判决。"""
+    from harness.config import Config
+    agent = VisionSubAgent(Config(vision_api_key="test-key"))
+    return agent
+
+
+@pytest.fixture
+def passing_verdict() -> VisionVerdict:
+    return VisionVerdict(
+        pass_=True,
+        reason="光照角度正确，阴影长度符合预期",
+        adjustment="无需调整",
+    )
+
+
+@pytest.fixture
+def failing_verdict() -> VisionVerdict:
+    return VisionVerdict(
+        pass_=False,
+        reason="亮度过高，方向光角度仍接近正午",
+        adjustment="调整方向光角度降至 15 度，强度降至 30%",
+    )
+
+
+# ---- Helper: build ToolCallCompleted ----
+
+def _screenshot_event(name: str, image_b64: str = "fake-base64-data") -> ToolCallCompleted:
+    """构建模拟的截图工具调用完成事件。"""
+    return ToolCallCompleted(
+        name=name,
+        args={},
+        raw_result={
+            "content": [
+                {"type": "image", "data": image_b64, "mimeType": "image/png"}
+            ]
+        },
+        parsed_text="[image: image/png]",
+        error=None,
+        duration_ms=150.0,
+    )
+
+
+def _non_screenshot_event(name: str = "SceneTools.find_actors") -> ToolCallCompleted:
+    """构建模拟的非截图工具调用完成事件。"""
+    return ToolCallCompleted(
+        name=name,
+        args={"glob": "*Light*"},
+        raw_result={"content": [{"type": "text", "text": "Found 3 actors"}]},
+        parsed_text="Found 3 actors",
+        error=None,
+        duration_ms=50.0,
+    )
+
+
+def _error_event(name: str = "ToolsetRegistry.EditorAppToolset.CaptureEditorImage") -> ToolCallCompleted:
+    """构建模拟的工具调用错误事件。"""
+    return ToolCallCompleted(
+        name=name,
+        args={},
+        raw_result=None,
+        parsed_text=None,
+        error=Exception("Screenshot failed"),
+        duration_ms=100.0,
+    )
+
+
+# ---- Tests ----
+
+class TestVisionInterceptorBasic:
+    """基础行为：触发 vs 不触发。"""
+
+    async def test_screenshot_tool_triggers_vision(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """截图工具调用成功后，应触发 Vision 分析。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            event = _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            await interceptor.post_call(event)
+
+            mock_check.assert_called_once()
+            # image_b64 是第一个位置参数（self 之后）
+            assert mock_check.call_args.args[0] == "fake-base64-data"
+
+    async def test_non_screenshot_tool_skips_vision(
+        self, mock_vision_agent, world_state
+    ) -> None:
+        """非截图工具调用不应触发 Vision 分析。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            event = _non_screenshot_event()
+            await interceptor.post_call(event)
+
+            mock_check.assert_not_called()
+
+    async def test_error_event_skips_vision(
+        self, mock_vision_agent, world_state
+    ) -> None:
+        """工具调用失败（error 非 None）时不触发 Vision 分析。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            event = _error_event()
+            await interceptor.post_call(event)
+
+            mock_check.assert_not_called()
+
+    async def test_no_image_data_skips_vision(
+        self, mock_vision_agent, world_state
+    ) -> None:
+        """截图工具的返回结果中无图片数据时，不触发 Vision 分析。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            event = ToolCallCompleted(
+                name="ToolsetRegistry.EditorAppToolset.CaptureEditorImage",
+                args={},
+                raw_result={"content": [{"type": "text", "text": "no image here"}]},
+                parsed_text="no image here",
+                error=None,
+                duration_ms=150.0,
+            )
+            await interceptor.post_call(event)
+
+            mock_check.assert_not_called()
+
+
+class TestVisionInterceptorResultWriting:
+    """Vision 结果写入 WorldState。"""
+
+    async def test_passing_verdict_written_to_cache(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            event = _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            await interceptor.post_call(event)
+
+            assert world_state.last_vision_verdict is not None
+            assert world_state.last_vision_verdict["pass"] is True
+            assert "光照" in world_state.last_vision_verdict["reason"]
+            assert "at" in world_state.last_vision_verdict
+
+    async def test_failing_verdict_written_to_cache(
+        self, mock_vision_agent, world_state, failing_verdict
+    ) -> None:
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = failing_verdict
+
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            event = _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            await interceptor.post_call(event)
+
+            assert world_state.last_vision_verdict is not None
+            assert world_state.last_vision_verdict["pass"] is False
+            assert "调整" in world_state.last_vision_verdict["reason"] or \
+                   "调整" in world_state.last_vision_verdict.get("adjustment", "")
+
+    async def test_vision_verdict_overwrites_previous(
+        self, mock_vision_agent, world_state, passing_verdict, failing_verdict
+    ) -> None:
+        """重复截图时，新判决覆盖旧判决。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            # First call: passing
+            mock_check.return_value = passing_verdict
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            await interceptor.post_call(
+                _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            )
+            assert world_state.last_vision_verdict["pass"] is True
+
+            # Second call: failing (overwrites)
+            mock_check.return_value = failing_verdict
+            await interceptor.post_call(
+                _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            )
+            assert world_state.last_vision_verdict["pass"] is False
+
+
+class TestVisionInterceptorFailureTolerance:
+    """Vision 分析失败不应阻断主流程。"""
+
+    async def test_vision_api_error_does_not_raise(
+        self, mock_vision_agent, world_state
+    ) -> None:
+        """Vision API 抛异常时，post_call 不应向上传播异常。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.side_effect = RuntimeError("Vision API timeout")
+
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            event = _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+
+            # Should not raise
+            await interceptor.post_call(event)
+
+            # last_vision_verdict should be unchanged (or set to error marker)
+            # Either None or an error entry — both are acceptable as long as no crash
+
+    async def test_vision_failure_keeps_previous_verdict(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """Vision 成功后再次截图失败，保留上一次的成功判决。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            # First: success
+            mock_check.return_value = passing_verdict
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+            await interceptor.post_call(
+                _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            )
+            assert world_state.last_vision_verdict is not None
+            previous = world_state.last_vision_verdict
+
+            # Second: failure
+            mock_check.side_effect = RuntimeError("Vision API timeout")
+            await interceptor.post_call(
+                _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            )
+
+            # Should still have the previous verdict
+            assert world_state.last_vision_verdict == previous
+
+
+class TestVisionInterceptorToolDetection:
+    """截图工具名检测：各种变体都能正确识别。"""
+
+    SCREENSHOT_NAMES = [
+        "ToolsetRegistry.EditorAppToolset.CaptureEditorImage",
+        "ToolsetRegistry.Plugin.SlateInspectorToolset.SlateInspector.Screenshot",
+        "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
+        "Screenshot",
+        "CaptureEditorImage",
+        "CaptureAssetImage",
+    ]
+
+    NON_SCREENSHOT_NAMES = [
+        "SceneTools.find_actors",
+        "ActorTools.set_actor_transform",
+        "ObjectTools.set_properties",
+        "load_level",
+        "SetCameraTransform",
+        "GetVisibleActors",
+    ]
+
+    async def test_all_screenshot_names_detected(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """所有截图工具名变体都应被识别并触发 Vision。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+
+            for name in self.SCREENSHOT_NAMES:
+                mock_check.reset_mock()
+                event = _screenshot_event(name)
+                await interceptor.post_call(event)
+                mock_check.assert_called_once(), f"Failed to detect: {name}"
+
+    async def test_non_screenshot_names_not_detected(
+        self, mock_vision_agent, world_state
+    ) -> None:
+        """非截图工具名都不应触发 Vision。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+
+            for name in self.NON_SCREENSHOT_NAMES:
+                mock_check.reset_mock()
+                event = _non_screenshot_event(name)
+                await interceptor.post_call(event)
+                mock_check.assert_not_called(), f"Incorrectly detected: {name}"
+
+
+class TestVisionInterceptorSkillIntegration:
+    """与 Skill 系统的集成：从活跃 Skill 提取 verification.expected。"""
+
+    async def test_expected_from_active_skill(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """活跃 Skill 的 verification.expected 应传递给 Vision。"""
+        active_skill = {
+            "name": "evening-lighting",
+            "verification": {
+                "type": "screenshot",
+                "expected": "场景具有温暖的低角度光照和长阴影",
+                "tolerance": 0.7,
+            },
+        }
+
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+
+            interceptor = VisionInterceptor(
+                mock_vision_agent, world_state,
+                get_active_skill=lambda: active_skill,
+            )
+            event = _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            await interceptor.post_call(event)
+
+            call_kwargs = mock_check.call_args.kwargs
+            assert call_kwargs["expected"] == "场景具有温暖的低角度光照和长阴影"
+            assert call_kwargs["tolerance"] == 0.7
+
+    async def test_no_active_skill_passes_none_expected(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """无活跃 Skill 时，expected 应传 None（走自由描述模式）。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+
+            interceptor = VisionInterceptor(
+                mock_vision_agent, world_state,
+                get_active_skill=lambda: None,
+            )
+            event = _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            await interceptor.post_call(event)
+
+            call_kwargs = mock_check.call_args.kwargs
+            assert call_kwargs["expected"] is None
+
+    async def test_skill_without_verification_section(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """Skill 无 verification 字段时，expected 应为 None。"""
+        active_skill = {"name": "simple-skill", "steps": "1. do something"}
+
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+
+            interceptor = VisionInterceptor(
+                mock_vision_agent, world_state,
+                get_active_skill=lambda: active_skill,
+            )
+            event = _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
+            await interceptor.post_call(event)
+
+            call_kwargs = mock_check.call_args.kwargs
+            assert call_kwargs["expected"] is None
+
+
+class TestVisionInterceptorImageExtraction:
+    """从不同格式的工具返回中提取图片 base64。"""
+
+    async def test_image_from_content_image_block(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """MCP content array 中的 image block → 提取 base64。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+
+            event = ToolCallCompleted(
+                name="CaptureEditorImage",
+                args={},
+                raw_result={
+                    "content": [
+                        {"type": "image", "data": "abc123base64==", "mimeType": "image/png"}
+                    ]
+                },
+                parsed_text="[image: image/png]",
+                error=None,
+                duration_ms=200.0,
+            )
+            await interceptor.post_call(event)
+
+            mock_check.assert_called_once()
+            assert mock_check.call_args.args[0] == "abc123base64=="
+
+    async def test_image_from_nested_text_block(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """文本块中嵌套的 returnValue.data → 提取 base64。"""
+        import json
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+
+            inner = json.dumps({
+                "returnValue": {"mimeType": "image/png", "data": "nested123base64=="}
+            })
+            event = ToolCallCompleted(
+                name="CaptureEditorImage",
+                args={},
+                raw_result={
+                    "content": [{"type": "text", "text": inner}]
+                },
+                parsed_text=inner,
+                error=None,
+                duration_ms=200.0,
+            )
+            await interceptor.post_call(event)
+
+            mock_check.assert_called_once()
+            assert mock_check.call_args.args[0] == "nested123base64=="
+
+    async def test_image_from_data_uri(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """data:image URI 格式 → 提取 base64。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+            interceptor = VisionInterceptor(mock_vision_agent, world_state)
+
+            event = ToolCallCompleted(
+                name="CaptureEditorImage",
+                args={},
+                raw_result={
+                    "content": [{
+                        "type": "text",
+                        "text": "data:image/png;base64,uriData123base64=="
+                    }]
+                },
+                parsed_text="data:image/png;base64,uriData123base64==",
+                error=None,
+                duration_ms=200.0,
+            )
+            await interceptor.post_call(event)
+
+            mock_check.assert_called_once()
+            assert mock_check.call_args.args[0] == "uriData123base64=="

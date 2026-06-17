@@ -25,7 +25,9 @@ class TestConfigDefaults:
 
     def test_default_log_dir(self) -> None:
         cfg = Config()
-        assert cfg.log_dir == Path.home() / ".ue-harness" / "logs"
+        # 默认指向仓库根目录下的 .ue-harness/logs
+        assert cfg.log_dir.name == "logs"
+        assert cfg.log_dir.parent.name == ".ue-harness"
 
 
 class TestConfigFromEnv:

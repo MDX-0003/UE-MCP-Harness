@@ -83,6 +83,24 @@ def _render_state_snapshot(state: WorldState | None) -> str:
             f"- ⚠ 以下工具集未受 State Cache 追踪，如需最新状态请手动查询：{dirty_list}"
         )
 
+    # 007 验证闭环：视觉验证反馈
+    if state.last_vision_verdict:
+        verdict = state.last_vision_verdict
+        passed = verdict.get("pass", False)
+        reason = verdict.get("reason", "")
+        adjustment = verdict.get("adjustment", "")
+        at_time = verdict.get("at", "")
+
+        lines.append("")
+        if passed:
+            lines.append(f"上次视觉验证：✅ 通过 — {reason}")
+        else:
+            lines.append(f"上次视觉验证：❌ 未通过 — {reason}")
+            if adjustment and adjustment != "无需调整":
+                lines.append(f"  建议调整：{adjustment}")
+        if at_time:
+            lines.append(f"  验证时间：{at_time}")
+
     return "\n".join(lines)
 
 
