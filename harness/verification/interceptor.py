@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Callable
 
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
 from harness.state.models import WorldState
+from harness.verification.capturer import parse_screenshot, Screenshot
 from harness.verification.vision_agent import VisionSubAgent
 
 logger = logging.getLogger("harness.verification.interceptor")
@@ -50,10 +50,12 @@ class VisionInterceptor(ToolCallInterceptor):
         vision_agent: VisionSubAgent,
         cache: WorldState,
         get_active_skill: Callable[[], dict | None] | None = None,
+        get_pending_screenshot: Callable[[], Screenshot | None] | None = None,
     ) -> None:
         self._vision = vision_agent
         self._cache = cache
         self._get_active_skill = get_active_skill or (lambda: None)
+        self._get_pending_screenshot = get_pending_screenshot or (lambda: None)
 
     # ---- ToolCallInterceptor ----
 
@@ -65,10 +67,20 @@ class VisionInterceptor(ToolCallInterceptor):
         if event.error is not None:
             return
 
-        if not _is_screenshot_tool(event.name):
+        if not _is_screenshot_tool(event.name) and event.name != "take_screenshot":
             return
 
-        image_b64 = _extract_image_base64(event.raw_result)
+        # —— 路径 A: Harness take_screenshot ——
+        if event.name == "take_screenshot":
+            screenshot = self._get_pending_screenshot()
+            if screenshot is None:
+                logger.debug("take_screenshot 回调返回空，跳过 Vision 分析")
+                return
+            image_b64 = screenshot.data_b64
+        else:
+            # —— 路径 B: UE 原生截图工具 ——
+            image_b64 = _extract_image_b64(event)
+
         if not image_b64:
             logger.debug("截图工具 %s 返回中无图片数据，跳过 Vision 分析", event.name)
             return
@@ -106,63 +118,47 @@ class VisionInterceptor(ToolCallInterceptor):
 # ---- 工具名检测 ----
 
 def _is_screenshot_tool(name: str) -> bool:
-    """判断工具名是否属于截图工具（短名关键词匹配，大小写不敏感）。"""
+    """
+    判断工具名是否属于UE的截图工具（短名关键词匹配，大小写不敏感）。
+    不论这个tool来自harness自己的tool还是ue的tool，都会return ture
+    """
     short = name.split(".")[-1].lower() if "." in name else name.lower()
     return any(kw in short for kw in _SCREENSHOT_KEYWORDS)
 
 
 # ---- 图片数据提取 ----
 
-def _extract_image_base64(raw: Any) -> str | None:
-    """从工具调用的 raw_result 中提取 base64 编码的图片数据。
+def _extract_image_b64(event: ToolCallCompleted) -> str | None:
+    """从工具调用事件中提取 base64 图片数据。
 
-    支持三种格式：
-      1. MCP content image block: {"content": [{"type": "image", "data": "..."}]}
-      2. 嵌套 returnValue: {"content": [{"type": "text", "text": "{\"returnValue\":{\"data\":\"...\"}}"}]}
-      3. Data URI: "data:image/png;base64,..."
+    Harness take_screenshot 工具：通过 VisionInterceptor 持有的回调获取
+    Screenshot 对象（已在 capturer.capture() 内完成解析 + resize）。
+
+    UE 原生截图工具（CaptureEditorImage / Screenshot 等）：
+    通过 capturer.parse_screenshot() 从 raw_result 中提取——6 种格式、
+    isError 检测、padding 修复、PIL resize 全部复用。
     """
-    if raw is None:
+    # —— 路径 A: Harness take_screenshot 工具 ——
+    if event.name == "take_screenshot":
+        # 回调由 server.py 注入，capturer.capture() 已完成解析+resize
+        return None  # 由 post_call 中通过 self._get_pending_screenshot() 获取
+
+    # —— 路径 B: UE 原生截图工具（CaptureEditorImage / Screenshot 等） ——
+    raw_dict = event.raw_result
+    if raw_dict is None:
         return None
 
-    if isinstance(raw, dict):
-        content = raw.get("content", [])
-
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-
-            # 格式 1: 直接 image block
-            if item.get("type") == "image":
-                data = item.get("data", "")
-                if data:
-                    return data
-
-            # 格式 2: 文本块中可能嵌套图片数据
-            if item.get("type") == "text":
-                text = item.get("text", "")
-
-                # 2a: 嵌套 returnValue JSON
-                if text.lstrip().startswith("{") and "returnValue" in text:
-                    try:
-                        inner = json.loads(text)
-                        rv = inner.get("returnValue", {})
-                        if isinstance(rv, dict):
-                            data = rv.get("data", "")
-                            if data:
-                                return data
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-                # 2b: Data URI
-                match = re.search(r'data:image/\w+;base64,([A-Za-z0-9+/=]+)', text)
-                if match:
-                    return match.group(1)
-
-    # 格式 3: 顶层就是纯 base64 字符串（非 dict 的 raw_result）
-    if isinstance(raw, str):
-        # Data URI in top-level string
-        match = re.search(r'data:image/\w+;base64,([A-Za-z0-9+/=]+)', raw)
-        if match:
-            return match.group(1)
-
-    return None
+    try:
+        raw_str = json.dumps(raw_dict) if not isinstance(raw_dict, str) else raw_dict
+        screenshot = parse_screenshot(raw_str)
+        # parse_screenshot 对无效图片数据返回 width=0 的 Screenshot（含 padding 修改）
+        if screenshot.width == 0:
+            logger.debug("截图工具 %s 返回中无有效图片数据", event.name)
+            return None
+        return screenshot.data_b64
+    except ValueError:
+        logger.debug("截图工具 %s 返回错误响应，跳过 Vision 分析", event.name)
+        return None
+    except Exception:
+        logger.debug("从 raw_result 提取 base64 失败: %s", event.name)
+        return None

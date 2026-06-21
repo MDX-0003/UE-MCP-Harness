@@ -2,6 +2,7 @@
 
 用法:
     harness start [--ue-port PORT] [--listen-port PORT]
+    HARNESS_VISION_DEBUG=1 harness start --ue-port 8000 --listen-port 9000
     harness start --ue-port 8000 --listen-port 9000
     harness version
     harness skill create|list|delete|update <name>
@@ -63,6 +64,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         ue_port=args.ue_port,
         listen_port=args.listen_port,
     )
+    from harness.verification.debug import init as debug_init
+    debug_init(config)
     _setup_logging(config.log_level)
     logger = logging.getLogger("harness")
 
@@ -81,6 +84,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     # 007 验证闭环 — 活跃 Skill 引用（build_server 内 update，VisionInterceptor 读取）
     _active_skill_ref: list[dict | None] = [None]
+    # take_screenshot 工具写入，VisionInterceptor / SnapshotRecorder 读取
+    _pending_screenshot_ref: list = [None]  # list[harness.verification.capturer.Screenshot | None]
 
     async def run() -> None:
         nonlocal session_id
@@ -96,6 +101,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         vision_interceptor = VisionInterceptor(
             vision_agent, _cache,
             get_active_skill=lambda: _active_skill_ref[0],
+            get_pending_screenshot=lambda: _pending_screenshot_ref[0],
         )
 
         try:
@@ -109,7 +115,10 @@ def cmd_start(args: argparse.Namespace) -> int:
             await tool_logger.start()
 
             snapshot_dir = config.log_dir / session_id
-            snapshot_recorder = SnapshotRecorder(snapshot_dir, _cache)
+            snapshot_recorder = SnapshotRecorder(
+                snapshot_dir, _cache,
+                get_pending_screenshot=lambda: _pending_screenshot_ref[0],
+            )
 
             interceptors: list[ToolCallInterceptor] = [
                 DebugPreCallInterceptor(),
@@ -137,7 +146,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             # 4. 构建并启动 MCP Server
             server = build_server(config, ue_client, interceptors,
                                   world_state=_cache, skill_ref=_active_skill_ref,
-                                  snapshot_recorder=snapshot_recorder)
+                                  snapshot_recorder=snapshot_recorder,
+                                  pending_screenshot_ref=_pending_screenshot_ref)
 
             # 初始化 instructions：列出可用 Skill
             skill_registry = SkillRegistry()

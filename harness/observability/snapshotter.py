@@ -19,12 +19,13 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from harness import __version__
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
 from harness.state.models import WorldState
-from harness.verification.interceptor import _is_screenshot_tool, _extract_image_base64
+from harness.verification.capturer import parse_screenshot, Screenshot
+from harness.verification.interceptor import _is_screenshot_tool
 
 logger = logging.getLogger("harness.observability.snapshotter")
 
@@ -46,9 +47,15 @@ class SnapshotRecorder(ToolCallInterceptor):
         cache: 全局 WorldState 实例。
     """
 
-    def __init__(self, snapshot_dir: Path, cache: WorldState) -> None:
+    def __init__(
+        self,
+        snapshot_dir: Path,
+        cache: WorldState,
+        get_pending_screenshot: Callable[[], Screenshot | None] | None = None,
+    ) -> None:
         self._dir = snapshot_dir
         self._cache = cache
+        self._get_pending_screenshot = get_pending_screenshot or (lambda: None)
         self._started_at = datetime.now(timezone.utc).isoformat()
         self._vision_call_count = 0
         self._skills_activated: list[str] = []
@@ -122,7 +129,26 @@ class SnapshotRecorder(ToolCallInterceptor):
         return d
 
     def _handle_screenshot(self, event: ToolCallCompleted) -> None:
-        b64 = _extract_image_base64(event.raw_result)
+        # —— 路径 A: Harness take_screenshot ——
+        if event.name == "take_screenshot":
+            screenshot = self._get_pending_screenshot()
+            if screenshot is None:
+                return
+            b64 = screenshot.data_b64
+        else:
+            # —— 路径 B: UE 原生截图工具 ——
+            raw_dict = event.raw_result
+            if raw_dict is None:
+                return
+            import json as _json
+            raw_str = _json.dumps(raw_dict) if not isinstance(raw_dict, str) else raw_dict
+            try:
+                parsed = parse_screenshot(raw_str)
+                if parsed.width == 0:
+                    return  # 无有效图片数据
+                b64 = parsed.data_b64
+            except (ValueError, Exception):
+                return
         if not b64:
             return
         ts = _timestamp()

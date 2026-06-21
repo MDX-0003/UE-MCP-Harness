@@ -20,7 +20,7 @@ class TestConfigDefaults:
         assert cfg.listen_port == 9000
 
     def test_ue_base_url(self) -> None:
-        cfg = Config(ue_host="127.0.0.1", ue_port=8000, ue_url_path="/mcp")
+        cfg = Config(ue_host="127.0.0.1", ue_port=8000)
         assert cfg.ue_base_url == "http://127.0.0.1:8000/mcp"
 
     def test_default_log_dir(self) -> None:

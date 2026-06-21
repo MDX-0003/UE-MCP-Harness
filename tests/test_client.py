@@ -1,8 +1,9 @@
-"""测试 harness.client 模块——SSE 解析器 + JSON-RPC 客户端。"""
+"""测试 harness.client 模块——SSE 解析器 + JSON-RPC 客户端 + 流式 SSE 读取。"""
 
 import json
 
 import pytest
+import httpx
 
 from harness.client import (
     JsonRpcError,
@@ -79,6 +80,105 @@ class TestSseParser:
         assert len(events) == 1
         data = json.loads(events[0].data or "")
         assert data["message"] == "你好世界"
+
+
+# ---- 流式 SSE 读取测试 -----------------------------------------------------
+
+
+class _FakeResponse:
+    """模拟 httpx Response，提供 aiter_lines() 迭代器。"""
+
+    def __init__(self, lines: list[str]):
+        self._lines = lines
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+@pytest.mark.asyncio
+async def test_read_sse_stream_result() -> None:
+    """SSE 流含 result 事件 → 正确返回。"""
+    cfg = Config()
+    session = McpClientSession(cfg)
+    response = _FakeResponse([
+        'event: message',
+        'data: {"result": {"content": [{"type": "text", "text": "ok"}]}}',
+        '',
+    ])
+    result = await session._read_sse_stream(1, response)
+    assert "ok" in result
+
+
+@pytest.mark.asyncio
+async def test_read_sse_stream_error() -> None:
+    """SSE 流含 error 事件 → 正确抛出 JsonRpcError。"""
+    cfg = Config()
+    session = McpClientSession(cfg)
+    response = _FakeResponse([
+        'data: {"error": {"code": -32000, "message": "Tool not found"}}',
+        '',
+    ])
+    with pytest.raises(JsonRpcError) as exc_info:
+        await session._read_sse_stream(1, response)
+    assert "Tool not found" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_read_sse_stream_skips_progress() -> None:
+    """progress 通知被跳过，result 正确返回。"""
+    cfg = Config()
+    session = McpClientSession(cfg)
+    response = _FakeResponse([
+        'data: {"method": "notifications/progress", "params": {"progress": 50}}',
+        '',
+        'data: {"result": "done"}',
+        '',
+    ])
+    result = await session._read_sse_stream(1, response)
+    assert result == 'done'
+
+
+@pytest.mark.asyncio
+async def test_read_sse_stream_multiline_data() -> None:
+    """多行 data 被正确拼接。"""
+    cfg = Config()
+    session = McpClientSession(cfg)
+    response = _FakeResponse([
+        'data: {"result":',
+        'data: "multiline"}',
+        '',
+    ])
+    result = await session._read_sse_stream(1, response)
+    assert result == 'multiline'
+
+
+@pytest.mark.asyncio
+async def test_read_sse_stream_comment_ignored() -> None:
+    """SSE 注释行被忽略。"""
+    cfg = Config()
+    session = McpClientSession(cfg)
+    response = _FakeResponse([
+        ': this is a comment',
+        'data: {"result": "after_comment"}',
+        '',
+    ])
+    result = await session._read_sse_stream(1, response)
+    assert result == 'after_comment'
+
+
+@pytest.mark.asyncio
+async def test_read_sse_stream_no_result() -> None:
+    """SSE 流在 result 出现前结束 → 抛出 JsonRpcError。"""
+    cfg = Config()
+    session = McpClientSession(cfg)
+    response = _FakeResponse([
+        'data: {"progress": 100}',
+        '',
+    ])
+    with pytest.raises(JsonRpcError) as exc_info:
+        await session._read_sse_stream(1, response)
+    assert "未找到工具结果" in str(exc_info.value)
 
 
 # ---- JSON-RPC 响应测试 ----------------------------------------------------

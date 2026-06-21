@@ -15,9 +15,15 @@ from datetime import datetime, timezone
 
 from harness.interceptor import ToolCallCompleted
 from harness.state.models import WorldState
+from harness.verification.capturer import Screenshot
 from harness.verification.interceptor import VisionInterceptor
 from harness.verification.vision_agent import VisionSubAgent, VisionVerdict
 
+# 1×1 透明 PNG 的 base64 — 可通过 parse_screenshot PIL 解码
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
 
 # ---- Fixtures ----
 
@@ -54,7 +60,7 @@ def failing_verdict() -> VisionVerdict:
 
 # ---- Helper: build ToolCallCompleted ----
 
-def _screenshot_event(name: str, image_b64: str = "fake-base64-data") -> ToolCallCompleted:
+def _screenshot_event(name: str, image_b64: str = _TINY_PNG_B64) -> ToolCallCompleted:
     """构建模拟的截图工具调用完成事件。"""
     return ToolCallCompleted(
         name=name,
@@ -111,8 +117,8 @@ class TestVisionInterceptorBasic:
             await interceptor.post_call(event)
 
             mock_check.assert_called_once()
-            # image_b64 是第一个位置参数（self 之后）
-            assert mock_check.call_args.args[0] == "fake-base64-data"
+            # image_b64 是第一个位置参数（parse_screenshot 对真实 PNG 做 PIL 解码+重编码，base64 值与输入可能不同）
+            assert mock_check.call_args.args[0] is not None
 
     async def test_non_screenshot_tool_skips_vision(
         self, mock_vision_agent, world_state
@@ -257,7 +263,6 @@ class TestVisionInterceptorToolDetection:
 
     SCREENSHOT_NAMES = [
         "ToolsetRegistry.EditorAppToolset.CaptureEditorImage",
-        "ToolsetRegistry.Plugin.SlateInspectorToolset.SlateInspector.Screenshot",
         "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
         "Screenshot",
         "CaptureEditorImage",
@@ -369,7 +374,17 @@ class TestVisionInterceptorSkillIntegration:
 
 
 class TestVisionInterceptorImageExtraction:
-    """从不同格式的工具返回中提取图片 base64。"""
+    """从不同格式的工具返回中提取图片 base64。
+
+    _parse_and_resize → parse_screenshot（重构后）对真实 PNG 做 PIL 解码+重编码，
+    输出 b64 与输入不完全相同（PNG re-encoding），因此断言验证 base64 非空即可。
+    """
+
+    # 1×1 透明 PNG 的 base64 编码
+    TINY_PNG_B64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+        "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
 
     async def test_image_from_content_image_block(
         self, mock_vision_agent, world_state, passing_verdict
@@ -384,7 +399,7 @@ class TestVisionInterceptorImageExtraction:
                 args={},
                 raw_result={
                     "content": [
-                        {"type": "image", "data": "abc123base64==", "mimeType": "image/png"}
+                        {"type": "image", "data": self.TINY_PNG_B64, "mimeType": "image/png"}
                     ]
                 },
                 parsed_text="[image: image/png]",
@@ -394,7 +409,8 @@ class TestVisionInterceptorImageExtraction:
             await interceptor.post_call(event)
 
             mock_check.assert_called_once()
-            assert mock_check.call_args.args[0] == "abc123base64=="
+            assert mock_check.call_args.args[0]  # 非空 base64
+            assert len(mock_check.call_args.args[0]) > 50
 
     async def test_image_from_nested_text_block(
         self, mock_vision_agent, world_state, passing_verdict
@@ -406,7 +422,7 @@ class TestVisionInterceptorImageExtraction:
             interceptor = VisionInterceptor(mock_vision_agent, world_state)
 
             inner = json.dumps({
-                "returnValue": {"mimeType": "image/png", "data": "nested123base64=="}
+                "returnValue": {"mimeType": "image/png", "data": self.TINY_PNG_B64}
             })
             event = ToolCallCompleted(
                 name="CaptureEditorImage",
@@ -421,7 +437,7 @@ class TestVisionInterceptorImageExtraction:
             await interceptor.post_call(event)
 
             mock_check.assert_called_once()
-            assert mock_check.call_args.args[0] == "nested123base64=="
+            assert mock_check.call_args.args[0]  # 非空 base64
 
     async def test_image_from_data_uri(
         self, mock_vision_agent, world_state, passing_verdict
@@ -431,20 +447,119 @@ class TestVisionInterceptorImageExtraction:
             mock_check.return_value = passing_verdict
             interceptor = VisionInterceptor(mock_vision_agent, world_state)
 
+            data_uri = f"data:image/png;base64,{self.TINY_PNG_B64}"
             event = ToolCallCompleted(
                 name="CaptureEditorImage",
                 args={},
                 raw_result={
-                    "content": [{
-                        "type": "text",
-                        "text": "data:image/png;base64,uriData123base64=="
-                    }]
+                    "content": [{"type": "text", "text": data_uri}]
                 },
-                parsed_text="data:image/png;base64,uriData123base64==",
+                parsed_text=data_uri,
                 error=None,
                 duration_ms=200.0,
             )
             await interceptor.post_call(event)
 
             mock_check.assert_called_once()
-            assert mock_check.call_args.args[0] == "uriData123base64=="
+            assert mock_check.call_args.args[0]  # 非空 base64
+
+
+class TestVisionInterceptorTakeScreenshot:
+    """Harness take_screenshot 工具 — 通过 get_pending_screenshot 回调注入 Screenshot。"""
+
+    async def test_take_screenshot_triggers_vision(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """take_screenshot 工具 → VisionInterceptor 通过回调获取 Screenshot → 调 Vision。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+
+            screenshot = Screenshot(data_b64=_TINY_PNG_B64, width=1, height=1)
+            interceptor = VisionInterceptor(
+                mock_vision_agent, world_state,
+                get_pending_screenshot=lambda: screenshot,
+            )
+            event = ToolCallCompleted(
+                name="take_screenshot",
+                args={},
+                raw_result={"content": [{"type": "text", "text": "Screenshot 已获取: 1x1 image/png"}]},
+                parsed_text="Screenshot 已获取: 1x1 image/png",
+                error=None,
+                duration_ms=200.0,
+            )
+            await interceptor.post_call(event)
+
+            mock_check.assert_called_once()
+            assert mock_check.call_args.args[0]  # 非空 base64
+
+    async def test_take_screenshot_null_callback_skips(
+        self, mock_vision_agent, world_state
+    ) -> None:
+        """get_pending_screenshot 返回 None → 跳过 Vision 分析。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            interceptor = VisionInterceptor(
+                mock_vision_agent, world_state,
+                get_pending_screenshot=lambda: None,
+            )
+            event = ToolCallCompleted(
+                name="take_screenshot",
+                args={},
+                raw_result={"content": [{"type": "text", "text": "截图失败: ..."}]},
+                parsed_text="截图失败: ...",
+                error=None,
+                duration_ms=200.0,
+            )
+            await interceptor.post_call(event)
+
+            mock_check.assert_not_called()
+
+    async def test_take_screenshot_with_skill_expected(
+        self, mock_vision_agent, world_state, passing_verdict
+    ) -> None:
+        """take_screenshot + 活跃 Skill 的 verification.expected → 传给 Vision。"""
+        active_skill = {
+            "name": "evening-lighting",
+            "verification": {
+                "type": "screenshot",
+                "expected": "黄昏光照",
+                "tolerance": 0.85,
+            },
+        }
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = passing_verdict
+
+            screenshot = Screenshot(data_b64=_TINY_PNG_B64, width=1, height=1)
+            interceptor = VisionInterceptor(
+                mock_vision_agent, world_state,
+                get_active_skill=lambda: active_skill,
+                get_pending_screenshot=lambda: screenshot,
+            )
+            event = ToolCallCompleted(
+                name="take_screenshot", args={},
+                raw_result={}, parsed_text="...", error=None, duration_ms=200.0,
+            )
+            await interceptor.post_call(event)
+
+            mock_check.assert_called_once()
+            call_kwargs = mock_check.call_args.kwargs
+            assert call_kwargs["expected"] == "黄昏光照"
+            assert call_kwargs["tolerance"] == 0.85
+
+    async def test_take_screenshot_error_event_skips(
+        self, mock_vision_agent, world_state
+    ) -> None:
+        """take_screenshot 出错时（error 非 None）→ 不触发 Vision。"""
+        with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
+            screenshot = Screenshot(data_b64=_TINY_PNG_B64, width=1, height=1)
+            interceptor = VisionInterceptor(
+                mock_vision_agent, world_state,
+                get_pending_screenshot=lambda: screenshot,
+            )
+            event = ToolCallCompleted(
+                name="take_screenshot", args={},
+                raw_result=None, parsed_text=None,
+                error=Exception("UE 连接超时"), duration_ms=5000.0,
+            )
+            await interceptor.post_call(event)
+
+            mock_check.assert_not_called()

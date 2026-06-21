@@ -12,6 +12,11 @@ from harness.interceptor import ToolCallCompleted
 from harness.observability.snapshotter import SnapshotRecorder
 from harness.state.models import WorldState
 
+# 1×1 透明 PNG 的 base64 — 可通过 parse_screenshot PIL 解码
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
 
 # ---- Fixtures ----
 
@@ -26,8 +31,8 @@ def world_state() -> WorldState:
 
 # ---- Helper: build ToolCallCompleted events ----
 
-def _screenshot_event(name: str = "CaptureEditorImage", b64: str = "ZmFrZS1iYXNlNjQtaW1hZ2U=") -> ToolCallCompleted:
-    """模拟截图工具调用完成事件（b64 = "fake-base64-image" 的 base64 编码）。"""
+def _screenshot_event(name: str = "CaptureEditorImage", b64: str = _TINY_PNG_B64) -> ToolCallCompleted:
+    """模拟截图工具调用完成事件（1×1 透明 PNG）。"""
     return ToolCallCompleted(
         name=name,
         args={},
@@ -209,3 +214,67 @@ class TestSnapshotRecorderSession:
         # Should not raise — directory auto-created
         await recorder.post_call(_screenshot_event())
         assert (snapshot_dir / "nonexistent" / "deep" / "screenshots").exists()
+
+
+class TestSnapshotRecorderTakeScreenshot:
+    """Harness take_screenshot 工具 — 通过 get_pending_screenshot 回调获取 Screenshot。"""
+
+    async def test_take_screenshot_saves_png(self, snapshot_dir, world_state) -> None:
+        """take_screenshot → SnapshotRecorder 通过回调获取 Screenshot → 写 PNG 到磁盘。"""
+        from harness.verification.capturer import Screenshot
+        recorder = SnapshotRecorder(
+            snapshot_dir, world_state,
+            get_pending_screenshot=lambda: Screenshot(data_b64=_TINY_PNG_B64, width=1, height=1),
+        )
+        event = ToolCallCompleted(
+            name="take_screenshot",
+            args={},
+            raw_result={"content": [{"type": "text", "text": "Screenshot 已获取: 1x1 image/png"}]},
+            parsed_text="Screenshot 已获取: 1x1 image/png",
+            error=None,
+            duration_ms=200.0,
+        )
+        await recorder.post_call(event)
+
+        screenshots = list((snapshot_dir / "screenshots").glob("*.png"))
+        assert len(screenshots) == 1
+        assert screenshots[0].name.endswith("_take_screenshot.png")
+
+    async def test_take_screenshot_null_callback_skips(self, snapshot_dir, world_state) -> None:
+        """回调返回 None → 不写文件。"""
+        recorder = SnapshotRecorder(
+            snapshot_dir, world_state,
+            get_pending_screenshot=lambda: None,
+        )
+        event = ToolCallCompleted(
+            name="take_screenshot", args={},
+            raw_result={}, parsed_text="...", error=None, duration_ms=200.0,
+        )
+        await recorder.post_call(event)
+
+        screenshots_dir = snapshot_dir / "screenshots"
+        assert not screenshots_dir.exists() or not list(screenshots_dir.glob("*.png"))
+
+    async def test_take_screenshot_with_verdict(self, snapshot_dir, world_state) -> None:
+        """take_screenshot + WorldState 中有 verdict → 同时写 PNG 和 verdict JSON。"""
+        from harness.verification.capturer import Screenshot
+        world_state.last_vision_verdict = {
+            "pass": True, "reason": "光照正确", "adjustment": "无需调整",
+            "at": "2026-06-21T00:00:00Z"
+        }
+        recorder = SnapshotRecorder(
+            snapshot_dir, world_state,
+            get_pending_screenshot=lambda: Screenshot(data_b64=_TINY_PNG_B64, width=1, height=1),
+        )
+        event = ToolCallCompleted(
+            name="take_screenshot", args={},
+            raw_result={}, parsed_text="...", error=None, duration_ms=200.0,
+        )
+        await recorder.post_call(event)
+
+        verdicts = list((snapshot_dir / "screenshots").glob("*.verdict.json"))
+        assert len(verdicts) == 1
+        import json as _json
+        data = _json.loads(verdicts[0].read_text(encoding="utf-8"))
+        assert data["pass"] is True
+        assert data["reason"] == "光照正确"

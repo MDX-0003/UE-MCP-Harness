@@ -18,7 +18,6 @@ class Config:
     # UE MCP Server 连接
     ue_port: int = 8000
     ue_host: str = "127.0.0.1"
-    ue_url_path: str = "/mcp"
 
     # Harness MCP Server 监听
     listen_host: str = "127.0.0.1"
@@ -29,20 +28,30 @@ class Config:
 
     # 超时（秒）
     request_timeout: float = 30.0
-    sse_read_timeout: float = 60.0
+    sse_read_timeout: float = 120.0
 
     # 工具预加载
     preload_all_toolsets: bool = True
 
     # 004 Context Assembly — 自由探索模式工具白名单
     # 使用短名（toolset 前缀），匹配时检查全限定工具名是否包含任一模式
+    # 注: SlateInspectorToolset 在当前 UE 5.8 构建中未启用，截图统一走 EditorAppToolset
     default_tools_allowlist: tuple[str, ...] = (
         "EditorAppToolset.",
-        "SlateInspector.",
         "scene.SceneTools.",
         "actor.ActorTools.",
         "object.ObjectTools.",
     )
+
+    # 工具排除列表 — allowlist 匹配后进一步剔除（逃生通道不受影响）。
+    # UE 原生截图工具由 Harness take_screenshot 替代，LLM 无需直接看到。
+    default_tools_denylist: tuple[str, ...] = (
+        "CaptureEditorImage",
+        "CaptureAssetImage",
+    )
+
+    # 视觉调试：True 时打印截图/vision 异常的完整 traceback
+    vision_debug: bool = True
 
     # 006 Vision Pipeline — Vision API 配置
     vision_api_key: str = ""  # 在 .vision.env 中填写
@@ -56,8 +65,8 @@ class Config:
 
     @property
     def ue_base_url(self) -> str:
-        """UE MCP Server 完整 base URL。"""
-        return f"http://{self.ue_host}:{self.ue_port}{self.ue_url_path}"
+        """UE MCP Server 完整 base URL。所有请求直接使用此 URL，不追加路径。"""
+        return f"http://{self.ue_host}:{self.ue_port}/mcp"
 
     @classmethod
     def from_env(cls) -> Config:
@@ -66,20 +75,21 @@ class Config:
         return cls(
             ue_port=int(os.getenv("HARNESS_UE_PORT", "8000")),
             ue_host=os.getenv("HARNESS_UE_HOST", "127.0.0.1"),
-            ue_url_path=os.getenv("HARNESS_UE_URL_PATH", "/mcp"),
             listen_host=os.getenv("HARNESS_LISTEN_HOST", "127.0.0.1"),
             listen_port=int(os.getenv("HARNESS_LISTEN_PORT", "9000")),
             mcp_protocol_version=os.getenv(
                 "HARNESS_MCP_PROTOCOL_VERSION", "2025-11-25"
             ),
             request_timeout=float(os.getenv("HARNESS_REQUEST_TIMEOUT", "30.0")),
-            sse_read_timeout=float(os.getenv("HARNESS_SSE_READ_TIMEOUT", "60.0")),
+            sse_read_timeout=(
+                float(v) if (v := os.getenv("HARNESS_SSE_READ_TIMEOUT")) else 120.0
+            ),
             preload_all_toolsets=os.getenv(
                 "HARNESS_PRELOAD_TOOLSETS", "true"
             ).lower()
             != "false",
             log_level=os.getenv("HARNESS_LOG_LEVEL", "INFO"),
-            log_dir=Path(os.getenv("HARNESS_LOG_DIR", str(_default_log_dir()))),
+            log_dir=Path(os.getenv("HARNESS_LOG_DIR") or str(_default_log_dir())),
             vision_api_key=os.getenv("HARNESS_VISION_API_KEY", ""),
             vision_api_base_url=os.getenv(
                 "HARNESS_VISION_API_BASE_URL",
@@ -111,7 +121,6 @@ class Config:
         current = {
             "ue_port": self.ue_port,
             "ue_host": self.ue_host,
-            "ue_url_path": self.ue_url_path,
             "listen_host": self.listen_host,
             "listen_port": self.listen_port,
             "mcp_protocol_version": self.mcp_protocol_version,
@@ -121,6 +130,8 @@ class Config:
             "log_level": self.log_level,
             "log_dir": self.log_dir,
             "default_tools_allowlist": self.default_tools_allowlist,
+            "default_tools_denylist": self.default_tools_denylist,
+            "vision_debug": self.vision_debug,
             "vision_api_key": self.vision_api_key,
             "vision_api_base_url": self.vision_api_base_url,
             "vision_model": self.vision_model,

@@ -19,13 +19,16 @@ def apply_filter(
     allowlist: tuple[str, ...],
     *,
     extra_allowed: frozenset[str] | None = None,
+    denylist: tuple[str, ...] = (),
 ) -> list[dict]:
-    """过滤工具列表，仅保留 allowlist 匹配和逃生通道工具。
+    """过滤工具列表，仅保留 allowlist 匹配且不在 denylist 中的工具。
 
     Args:
         raw_tools: UE 端原始工具列表（含全限定名）。
         allowlist: 工具名子串匹配模式列表。例如 ("SceneTools.", "EditorAppToolset.")。
         extra_allowed: 额外放行的工具全名集合（Skill 模式下的 tools_allowlist）。
+        denylist: 排除工具的子串匹配模式列表。即使匹配 allowlist，命中 denylist 的工具也会被排除。
+                  逃生通道工具不受 denylist 影响。
 
     Returns:
         过滤后的工具列表。
@@ -39,15 +42,20 @@ def apply_filter(
     for tool in raw_tools:
         name = tool.get("name", "")
 
-        # 逃生通道始终可见
+        # 逃生通道始终可见（不受 denylist 影响）
         if any(name.endswith(e) or name == e for e in escape):
             result.append(tool)
             continue
 
         # allowlist 子串匹配
-        if any(pattern in name for pattern in allowlist):
-            result.append(tool)
+        if not any(pattern in name for pattern in allowlist):
             continue
+
+        # denylist 子串匹配 —— 命中则排除
+        if any(pattern in name for pattern in denylist):
+            continue
+
+        result.append(tool)
 
     return result
 

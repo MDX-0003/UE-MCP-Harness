@@ -1,4 +1,4 @@
-"""截图获取 — 通过 MCP 调用 SlateInspector.Screenshot() 或 EditorAppToolset.CaptureEditorImage()。
+"""截图获取 — 通过 MCP 调用 EditorAppToolset.CaptureEditorImage() 或 CaptureAssetImage()。
 
 FToolsetImage 返回 MimeType: "image/png" + Data: base64，Harness 零转码直传 Vision API。
 截图在发送前 resize 到最大 config.vision_max_size（默认 1024x768），保持宽高比。
@@ -32,34 +32,56 @@ async def capture(
     ue_client: McpClientSession,
     max_width: int = 1024,
     max_height: int = 768,
+    *,
+    mode: str = "viewport",
+    asset_path: str = "",
+    hide_ui: bool = False,
 ) -> Screenshot:
     """通过 MCP 获取 UE 编辑器截图。
 
-    优先使用 SlateInspector.Screenshot()，失败则尝试 EditorAppToolset.CaptureEditorImage()。
-    返回的 base64 数据已经过 resize 处理。
-    """
-    # 尝试 SlateInspector.Screenshot
-    try:
-        result = await ue_client.call_tool(
-            "ToolsetRegistry.Plugin.SlateInspectorToolset.SlateInspector.Screenshot",
-            {},
-        )
-        if result:
-            return _parse_and_resize(result, max_width, max_height)
-    except Exception:
-        logger.debug("SlateInspector.Screenshot 失败，尝试 EditorAppToolset.CaptureEditorImage")
+    mode 参数选择截图方案：
+      - "viewport": CaptureAssetImage(AssetPath="") — 仅视口画面，纯净场景，Vision 分析推荐
+      - "editor":   CaptureEditorImage() — 合成所有编辑器窗口，含面板/菜单/工具栏
+      - "asset":    CaptureAssetImage(AssetPath=<path>) — 单个资产缩略图渲染
 
-    # 回退方案
-    try:
+    asset_path: 仅 mode="asset" 时有效，如 "/Game/Meshes/SM_Cube"。
+    hide_ui:    隐藏编辑器 UI 覆盖层（gizmo、选中框线），仅 viewport/asset 模式有效。
+
+    失败时自动回退：editor → viewport；viewport/asset 直接抛异常。
+    返回的 base64 数据已经过 parse_screenshot() resize 处理。
+    """
+    if mode not in ("viewport", "editor", "asset"):
+        raise ValueError(f"无效的截图模式: {mode}，可选 viewport / editor / asset")
+
+    b_show_ui = not hide_ui
+
+    # ── 模式 1: editor（含 fallback） ──
+    if mode == "editor":
+        try:
+            result = await ue_client.call_tool(
+                "ToolsetRegistry.EditorAppToolset.CaptureEditorImage", {}
+            )
+            if result:
+                return parse_screenshot(result, max_width, max_height)
+        except Exception as e:
+            from harness.verification.debug import log_exception
+            log_exception(e, "capturer editor→viewport fallback")
+            logger.debug("CaptureEditorImage 失败，回退到 viewport 模式")
+
+        # fallback: editor → viewport
         result = await ue_client.call_tool(
-            "ToolsetRegistry.EditorAppToolset.CaptureEditorImage",
-            {},
+            "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
+            {"AssetPath": "", "bShowUI": b_show_ui},
         )
-        logger.debug("CaptureEditorImage 原始返回前 200 字符: %s", str(result)[:200])
-        return _parse_and_resize(result, max_width, max_height)
-    except Exception as e:
-        logger.error("截图工具调用失败: %s", e)
-        raise
+        return parse_screenshot(result, max_width, max_height)
+
+    # ── 模式 2/3: viewport / asset ──
+    path = "" if mode == "viewport" else asset_path
+    result = await ue_client.call_tool(
+        "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
+        {"AssetPath": path, "bShowUI": b_show_ui},
+    )
+    return parse_screenshot(result, max_width, max_height)
 
 
 def capture_from_file(path: Path, max_width: int = 1024, max_height: int = 768) -> Screenshot:
@@ -84,8 +106,11 @@ def capture_from_file(path: Path, max_width: int = 1024, max_height: int = 768) 
         return Screenshot(data_b64=b64)
 
 
-def _parse_and_resize(raw: str, max_width: int, max_height: int) -> Screenshot:
+def parse_screenshot(raw: str, max_width: int = 1024, max_height: int = 768) -> Screenshot:
     """解析 MCP 返回的截图数据并 resize。
+
+    这是截图数据提取的**唯一入口**——CLI、VisionInterceptor、SnapshotRecorder 三条路径均通过此函数汇聚。
+    接受原始 JSON-RPC result 字符串或已序列化的 dict，支持 6 种格式。纯函数，零副作用。
 
     MCP 可能返回两种格式：
       1. image content block: {"content": [{"type": "image", "data": "...", "mimeType": "image/png"}]}

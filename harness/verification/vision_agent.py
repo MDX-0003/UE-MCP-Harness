@@ -249,9 +249,12 @@ async def _call_vision_api(
         messages=anthropic_messages,
     )
 
-    # 提取文本
+    # 提取文本——跳过 thinking block（extended thinking 产物，非正文）
     text = ""
     for block in response.content:
+        # 跳过 ThinkingBlock / RedactedThinkingBlock
+        if hasattr(block, "thinking"):
+            continue
         if hasattr(block, "text"):
             text += block.text
         elif hasattr(block, "content"):
@@ -267,9 +270,7 @@ async def _call_vision_api(
                         text += item.text
         elif isinstance(block, dict):
             text += block.get("text", "")
-        else:
-            # 兜底：尝试直接转字符串
-            text += str(block)
+        # 兜底：未知 block 类型，跳过不拼接（避免 ThinkingBlock repr 污染正文）
 
     text = text.strip()
 

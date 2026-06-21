@@ -105,8 +105,10 @@ class McpClientSession:
             return
 
         self._http = httpx.AsyncClient(
-            base_url=self._config.ue_base_url,
-            timeout=httpx.Timeout(self._config.request_timeout),
+            timeout=httpx.Timeout(
+                self._config.sse_read_timeout,
+                read=self._config.sse_read_timeout,
+            ),
         )
 
         logger.info("正在连接 UE MCP Server: %s", self._config.ue_base_url)
@@ -147,10 +149,13 @@ class McpClientSession:
         """断开与 UE MCP Server 的连接。"""
         if self._http is None:
             return
-        if self._connected:
+
+        self._connected = False
+
+        if self._session_id:
             try:
                 await self._http.delete(
-                    self._config.ue_url_path,
+                    self._config.ue_base_url,
                     headers=self._build_headers(),
                 )
             except Exception:
@@ -158,7 +163,6 @@ class McpClientSession:
 
         await self._http.aclose()
         self._http = None
-        self._connected = False
         self._session_id = ""
         logger.info("已断开 UE MCP Server 连接。")
 
@@ -185,7 +189,12 @@ class McpClientSession:
         return resp.result.get("tools", [])
 
     async def call_tool(self, name: str, arguments: dict | None = None) -> str:
-        """调用 UE 端的指定工具，处理 SSE 两阶段响应。"""
+        """调用 UE 端的指定工具，增量处理 SSE 事件流。
+
+        使用 httpx.stream() 而非 post()——post() 在非流式模式下会预读整个
+        响应体后才返回，导致 CaptureAssetImage 等长耗时 SSE 工具超时。
+        stream() 在收到 HTTP 响应头后立即返回，body 通过 aiter_lines() 增量消费。
+        """
         self._ensure_connected()
 
         if arguments is None:
@@ -201,32 +210,36 @@ class McpClientSession:
 
         logger.info("调用工具: %s (id=%d)", name, rid)
 
-        response = await self._http.post(
-            self._config.ue_url_path,
+        async with self._http.stream(
+            "POST",
+            self._config.ue_base_url,
             json=payload,
             headers=self._build_headers(),
-            timeout=httpx.Timeout(self._config.sse_read_timeout),
-        )
-
-        if response.status_code != 200:
-            raise JsonRpcError(-32000, f"HTTP {response.status_code}: {response.text}")
-
-        content_type = response.headers.get("content-type", "")
-
-        if "text/event-stream" in content_type:
-            return self._extract_tool_result(rid, response.content)
-        elif "application/json" in content_type:
-            data = response.json()
-            if "error" in data:
-                err = data["error"]
+        ) as response:
+            if response.status_code != 200:
+                await response.aread()
                 raise JsonRpcError(
-                    err.get("code", -1),
-                    err.get("message", "Unknown error"),
-                    err.get("data"),
+                    -32000, f"HTTP {response.status_code}: {response.text}"
                 )
-            return json.dumps(data.get("result", {}), ensure_ascii=False)
-        else:
-            raise JsonRpcError(-32000, f"未知响应类型: {content_type}")
+
+            content_type = response.headers.get("content-type", "")
+
+            if "text/event-stream" in content_type:
+                return await self._read_sse_stream(rid, response)
+            elif "application/json" in content_type:
+                await response.aread()
+                data = response.json()
+                if "error" in data:
+                    err = data["error"]
+                    raise JsonRpcError(
+                        err.get("code", -1),
+                        err.get("message", "Unknown error"),
+                        err.get("data"),
+                    )
+                return json.dumps(data.get("result", {}), ensure_ascii=False)
+            else:
+                await response.aread()
+                raise JsonRpcError(-32000, f"未知响应类型: {content_type}")
 
     # ---- 私有方法 ----
 
@@ -240,7 +253,10 @@ class McpClientSession:
 
     def _build_headers(self) -> dict[str, str]:
         """构建带 session 和 protocol version 的请求 header。"""
-        headers: dict[str, str] = {"Content-Type": "application/json"}
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream, application/json",
+        }
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
         if self._negotiated_version:
@@ -277,7 +293,7 @@ class McpClientSession:
             else httpx.Timeout(self._config.request_timeout)
         )
         response = await self._http.post(
-            self._config.ue_url_path,
+            self._config.ue_base_url,
             json=payload,
             headers=self._build_headers(),
             timeout=req_timeout,
@@ -360,33 +376,68 @@ class McpClientSession:
             )
         return JsonRpcResponse(id=rid, result=data.get("result", {})), resp_headers
 
-    def _extract_tool_result(self, request_id: int, raw: bytes) -> str:
-        """从 tools/call 的 SSE 响应中提取最终工具结果。"""
-        events = parse_sse_stream(raw)
+    async def _read_sse_stream(self, request_id: int, response) -> str:
+        """增量读取 SSE 事件流，遇 result/error 立即返回。
 
-        for evt in events:
-            if not evt.data:
-                continue
-            try:
-                data = json.loads(evt.data)
-            except json.JSONDecodeError:
-                continue
-            if data.get("method") == "notifications/progress":
-                continue
-            if "result" in data:
-                result = data["result"]
-                if isinstance(result, dict):
-                    return json.dumps(result, ensure_ascii=False)
-                return str(result)
-            if "error" in data:
-                err = data["error"]
-                raise JsonRpcError(
-                    err.get("code", -1),
-                    err.get("message", "Unknown error"),
-                    err.get("data"),
-                )
+        与 _rpc() 的阻塞式 response.content 不同，此方法使用 aiter_lines()
+        逐行消费 SSE 流——收到最终事件后立即返回，不等待 HTTP 连接关闭。
+        处理 progress 通知、多行 data、注释行。
+        """
+        data_parts: list[str] = []
+        line_count = 0
 
-        raise JsonRpcError(-32000, f"SSE 响应中未找到工具结果 (request_id={request_id})")
+        logger.debug("[sse-stream] _read_sse_stream id=%d 开始, content-type=%s",
+                     request_id,
+                     getattr(response, "headers", {}).get("content-type", "?"))
+
+        async for line in response.aiter_lines():
+            line_count += 1
+            if line_count <= 3:
+                logger.debug("[sse-stream] id=%d line[%d]: %s", request_id, line_count, line[:120])
+            if line == "":
+                # 空行 = 事件边界，处理已累积的 data
+                if data_parts:
+                    data_str = "".join(data_parts)
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        data_parts.clear()
+                        continue
+
+                    if data.get("method") == "notifications/progress":
+                        data_parts.clear()
+                        continue
+                    if "result" in data:
+                        result = data["result"]
+                        return (
+                            json.dumps(result, ensure_ascii=False)
+                            if isinstance(result, dict)
+                            else str(result)
+                        )
+                    if "error" in data:
+                        err = data["error"]
+                        raise JsonRpcError(
+                            err.get("code", -1),
+                            err.get("message", "Unknown error"),
+                            err.get("data"),
+                        )
+                data_parts.clear()
+                continue
+
+            if line.startswith(":"):
+                continue  # SSE 注释
+
+            if line.startswith("data:"):
+                value = line[5:]
+                if value.startswith(" "):
+                    value = value[1:]
+                data_parts.append(value)
+
+        raise JsonRpcError(
+            -32000,
+            f"SSE 流结束但未找到工具结果 (request_id={request_id}, "
+            f"共收到 {line_count} 行)",
+        )
 
     async def preload_all_toolsets(self) -> int:
         """延迟加载模式下，预加载所有工具集。"""

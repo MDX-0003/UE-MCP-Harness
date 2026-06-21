@@ -31,7 +31,6 @@ class TestApplyFilter:
 
     ALLOWLIST = (
         "EditorAppToolset.",
-        "SlateInspector.",
         "scene.SceneTools.",
         "actor.ActorTools.",
         "object.ObjectTools.",

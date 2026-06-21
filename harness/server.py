@@ -52,6 +52,7 @@ def build_server(
     world_state: WorldState | None = None,
     skill_ref: list[dict | None] | None = None,
     snapshot_recorder: Any | None = None,
+    pending_screenshot_ref: list[Any] | None = None,
 ) -> Server:
     """构建 MCP Server 实例。
 
@@ -125,9 +126,11 @@ def build_server(
         # 应用过滤（自由探索模式或 Skill 模式）
         if _active_skill:
             extra = frozenset(_active_skill.get("tools_allowlist", []))
-            return apply_filter(_cached_raw_tools, config.default_tools_allowlist, extra_allowed=extra)
+            return apply_filter(_cached_raw_tools, config.default_tools_allowlist,
+                                extra_allowed=extra, denylist=config.default_tools_denylist)
         else:
-            return apply_filter(_cached_raw_tools, config.default_tools_allowlist)
+            return apply_filter(_cached_raw_tools, config.default_tools_allowlist,
+                                denylist=config.default_tools_denylist)
 
     # ---- tools/list ----
 
@@ -183,6 +186,40 @@ def build_server(
             name="deactivate_skill",
             description="退出当前活跃的 Skill 模式，回到自由探索模式。",
             inputSchema={"type": "object", "properties": {}},
+        ))
+        result.append(Tool(
+            name="take_screenshot",
+            description=(
+                "Harness 截图工具（推荐）。通过 capturer 模块统一获取 UE 截图，"
+                "自动 resize 到 1024x768、isError 检测、base64 修复。"
+                "返回纯文本描述（不含 base64），视觉分析结果通过 get_context 查看。"
+                "支持三种模式：viewport（默认，仅视口画面）、editor（合成编辑器窗口）、"
+                "asset（单个资产缩略图）。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["viewport", "editor", "asset"],
+                        "description": (
+                            "截图模式。viewport=仅视口画面（推荐，适合 Vision 分析场景光照/构图）；"
+                            "editor=合成所有编辑器窗口（含面板/菜单/工具栏）；"
+                            "asset=单个资产缩略图（需配合 asset_path）"
+                        ),
+                        "default": "viewport",
+                    },
+                    "asset_path": {
+                        "type": "string",
+                        "description": "仅 mode=asset 时有效，资产路径如 /Game/Meshes/SM_Cube",
+                    },
+                    "hide_ui": {
+                        "type": "boolean",
+                        "description": "隐藏编辑器 UI 覆盖层（gizmo、选中框线），仅 viewport/asset 有效",
+                        "default": False,
+                    },
+                },
+            },
         ))
 
         logger.info("LLM tools/list: 返回 %d 个工具（全量 %d 个，过滤后 + Harness 自有）",
@@ -299,6 +336,55 @@ def build_server(
             return CallToolResult(content=[TextContent(
                 type="text", text="当前未激活任何 Skill，已在自由探索模式。",
             )])
+
+        if name == "take_screenshot":
+            """Harness 截图工具 — 通过 capturer.capture() 统一获取截图。"""
+            from harness.verification.capturer import capture as capturer_capture
+            t0 = time.monotonic()
+            try:
+                mode = arguments.get("mode", "viewport")
+                asset_path = arguments.get("asset_path", "")
+                hide_ui = arguments.get("hide_ui", False)
+                max_w, max_h = config.vision_max_size
+                screenshot = await capturer_capture(
+                    ue_client, max_w, max_h,
+                    mode=mode, asset_path=asset_path, hide_ui=hide_ui,
+                )
+                if pending_screenshot_ref is not None:
+                    pending_screenshot_ref[0] = screenshot
+                result_text = (
+                    f"Screenshot 已获取: {screenshot.width}x{screenshot.height}"
+                    f" {screenshot.mime_type} (mode={mode})"
+                )
+            except Exception as e:
+                if pending_screenshot_ref is not None:
+                    pending_screenshot_ref[0] = None
+                from harness.verification.debug import log_exception
+                log_exception(e, "take_screenshot")
+                return CallToolResult(
+                    content=[TextContent(type="text",
+                        text=f"截图失败: {type(e).__name__}: {e}")],
+                    isError=True,
+                )
+
+            # 手动触发 post 拦截器链 — take_screenshot 不经过 UE 透传路径，
+            # 必须在此处让 VisionInterceptor / SnapshotRecorder 消费截图结果
+            duration_ms = (time.monotonic() - t0) * 1000
+            event = ToolCallCompleted(
+                name="take_screenshot",
+                args=arguments,
+                raw_result={"content": [{"type": "text", "text": result_text}]},
+                parsed_text=result_text,
+                error=None,
+                duration_ms=duration_ms,
+            )
+            for ic in interceptors:
+                try:
+                    await ic.post_call(event)
+                except Exception as e:
+                    logger.error("后拦截 %s 失败: %s", type(ic).__name__, e)
+
+            return CallToolResult(content=[TextContent(type="text", text=result_text)])
 
         # ---- UE 工具透传 ----
         t_start = time.monotonic()
