@@ -1,13 +1,10 @@
 {
 	"folders": [
 		{
+			"path": "../UE/UE_5.8/Engine/Plugins/Experimental/Toolsets"
+		},
+		{
 			"path": "."
-		},
-		{
-			"path": "../UE_5.8/Engine/Plugins/Experimental/Toolsets"
-		},
-		{
-			"path": "../UE_5.8/Engine/Plugins/Experimental/ToolsetRegistry"
 		}
 	],
 	"settings": {}
