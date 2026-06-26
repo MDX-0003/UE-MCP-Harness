@@ -39,49 +39,64 @@ async def capture(
 ) -> Screenshot:
     """通过 MCP 获取 UE 编辑器截图。
 
+    每次截图创建独立的 MCP session + TCP 连接，用完即关。
+    这绕过了 UE HTTP Server MultipleWriteStream 在跨线程异步
+    完成时的数据丢失问题——新 session 的第一个 SSE 流总是可靠的。
+
     mode 参数选择截图方案：
-      - "viewport": CaptureAssetImage(AssetPath="") — 仅视口画面，纯净场景，Vision 分析推荐
-      - "editor":   CaptureEditorImage() — 合成所有编辑器窗口，含面板/菜单/工具栏
-      - "asset":    CaptureAssetImage(AssetPath=<path>) — 单个资产缩略图渲染
-
-    asset_path: 仅 mode="asset" 时有效，如 "/Game/Meshes/SM_Cube"。
-    hide_ui:    隐藏编辑器 UI 覆盖层（gizmo、选中框线），仅 viewport/asset 模式有效。
-
-    失败时自动回退：editor → viewport；viewport/asset 直接抛异常。
-    返回的 base64 数据已经过 parse_screenshot() resize 处理。
+      - "viewport": CaptureAssetImage(AssetPath="") — 仅视口画面
+      - "editor":   CaptureEditorImage() — 合成编辑器窗口
+      - "asset":    CaptureAssetImage(AssetPath=<path>) — 资产缩略图
     """
     if mode not in ("viewport", "editor", "asset"):
         raise ValueError(f"无效的截图模式: {mode}，可选 viewport / editor / asset")
 
+    from harness.client import McpClientSession as _McpClientSession
+    from harness.config import Config as _Config
+
     b_show_ui = not hide_ui
 
-    # ── 模式 1: editor（含 fallback） ──
-    if mode == "editor":
-        try:
-            result = await ue_client.call_tool(
-                "ToolsetRegistry.EditorAppToolset.CaptureEditorImage", {}
-            )
-            if result:
-                return parse_screenshot(result, max_width, max_height)
-        except Exception as e:
-            from harness.verification.debug import log_exception
-            log_exception(e, "capturer editor→viewport fallback")
-            logger.debug("CaptureEditorImage 失败，回退到 viewport 模式")
+    # 创建独立 session，超时设为主 session 的 5 倍（默认 600s）。
+    # UE HTTP Server 的 MultipleWriteStream 在异步回调完成前不发送数据；
+    # 第二次截图可能因 UE 端资源竞争导致异步调度延迟 >120s。
+    shot_config = _Config(
+        ue_port=ue_client._config.ue_port,
+        ue_host=ue_client._config.ue_host,
+        sse_read_timeout=ue_client._config.sse_read_timeout * 5,
+        preload_all_toolsets=False,
+    )
+    shot_client = _McpClientSession(shot_config)
+    try:
+        await shot_client.connect()
 
-        # fallback: editor → viewport
-        result = await ue_client.call_tool(
+        if mode == "editor":
+            try:
+                result = await shot_client.call_tool(
+                    "ToolsetRegistry.EditorAppToolset.CaptureEditorImage", {}
+                )
+                if result:
+                    return parse_screenshot(result, max_width, max_height)
+            except Exception as e:
+                from harness.verification.debug import log_exception
+                log_exception(e, "capturer editor→viewport fallback")
+                logger.debug("CaptureEditorImage 失败，回退到 viewport 模式")
+
+            # fallback: editor → viewport
+            result = await shot_client.call_tool(
+                "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
+                {"AssetPath": "", "bShowUI": b_show_ui},
+            )
+            return parse_screenshot(result, max_width, max_height)
+
+        # viewport / asset
+        path = "" if mode == "viewport" else asset_path
+        result = await shot_client.call_tool(
             "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
-            {"AssetPath": "", "bShowUI": b_show_ui},
+            {"AssetPath": path, "bShowUI": b_show_ui},
         )
         return parse_screenshot(result, max_width, max_height)
-
-    # ── 模式 2/3: viewport / asset ──
-    path = "" if mode == "viewport" else asset_path
-    result = await ue_client.call_tool(
-        "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
-        {"AssetPath": path, "bShowUI": b_show_ui},
-    )
-    return parse_screenshot(result, max_width, max_height)
+    finally:
+        await shot_client.close()
 
 
 def capture_from_file(path: Path, max_width: int = 1024, max_height: int = 768) -> Screenshot:

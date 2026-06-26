@@ -87,21 +87,15 @@ class JsonRpcResponse:
 
 
 class McpClientSession:
-    """一个到 UE MCP Server 的 MCP 会话。
-
-    内部使用 MCP SDK 的 streamablehttp_client + ClientSession，
-    确保与 UE 直连测试使用完全相同的传输实现。
-    """
+    """一个到 UE MCP Server 的 MCP 会话。"""
 
     def __init__(self, config: Config) -> None:
         self._config = config
+        self._http: httpx.AsyncClient | None = None
+        self._request_id: int = 0
         self._session_id: str = ""
         self._negotiated_version: str = ""
         self._connected: bool = False
-
-        # SDK 内部对象
-        self._transport_ctx: object = None
-        self._sdk_session: object = None
 
     # ---- 连接生命周期 ----
 
@@ -110,23 +104,32 @@ class McpClientSession:
         if self._connected:
             return
 
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        self._http = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                self._config.sse_read_timeout,
+                read=self._config.sse_read_timeout,
+            ),
+            http2=False,
+        )
 
         logger.info("正在连接 UE MCP Server: %s", self._config.ue_base_url)
 
-        self._transport_ctx = streamablehttp_client(
-            self._config.ue_base_url,
-            timeout=self._config.sse_read_timeout,
-            sse_read_timeout=self._config.sse_read_timeout,
-        )
-        read, write, get_id = await self._transport_ctx.__aenter__()
-        self._sdk_session = ClientSession(read, write)
+        # MCP 握手: initialize
+        resp, headers = await self._rpc("initialize", {
+            "protocolVersion": self._config.mcp_protocol_version,
+            "capabilities": {},
+            "clientInfo": {"name": "ue-agent-harness", "version": "0.1.0"},
+        })
 
-        result = await self._sdk_session.initialize()
-        self._negotiated_version = result.protocolVersion
-        self._session_id = get_id() or ""
-        self._connected = True
+        if resp.error:
+            raise resp.error
+
+        self._negotiated_version = resp.result.get(
+            "protocolVersion", self._config.mcp_protocol_version
+        )
+        self._session_id = headers.get("mcp-session-id", "")
+        if not self._session_id:
+            logger.warning("未在 initialize 响应中找到 Mcp-Session-Id header")
 
         logger.info(
             "MCP 握手成功。Session: %s, 协议版本: %s",
@@ -134,20 +137,43 @@ class McpClientSession:
             self._negotiated_version,
         )
 
+        # 通知: initialized
+        resp, _ = await self._rpc("notifications/initialized", {}, expect_response=False)
+        if resp.error:
+            raise resp.error
+
+        self._connected = True
+        logger.info("UE MCP Server 连接就绪。")
+
     async def close(self) -> None:
-        """断开与 UE MCP Server 的连接。"""
-        if self._transport_ctx is None:
+        """断开与 UE MCP Server 的连接。
+
+        关闭顺序至关重要：
+        1. 标记 _connected=False，阻止新请求
+        2. 发送 DELETE 通知服务器终止 session（让服务器清理资源）
+        3. 关闭 HTTP 客户端（释放所有 TCP 连接）
+        """
+        if self._http is None:
             return
 
+        was_connected = self._connected
         self._connected = False
 
-        try:
-            await self._transport_ctx.__aexit__(None, None, None)
-        except Exception:
-            pass
+        if was_connected and self._session_id:
+            logger.debug("正在终止 MCP session: %s", self._session_id[:20])
+            try:
+                resp = await self._http.delete(
+                    self._config.ue_base_url,
+                    headers=self._build_headers(),
+                )
+                logger.debug("Session 终止响应: HTTP %d", resp.status_code)
+            except Exception as e:
+                # 静默处理——DELETE 失败不阻塞 Harness 关闭。
+                # 若频繁出现，检查 UE 端是否有残留 session（UE log: "Session initialized" 无对应 DELETE）。
+                logger.debug("Session 终止请求失败（非致命）: %s", e)
 
-        self._transport_ctx = None
-        self._sdk_session = None
+        await self._http.aclose()
+        self._http = None
         self._session_id = ""
         logger.info("已断开 UE MCP Server 连接。")
 
@@ -168,27 +194,105 @@ class McpClientSession:
     async def list_tools(self) -> list[dict]:
         """获取 UE 端所有可用工具的列表。"""
         self._ensure_connected()
-        result = await self._sdk_session.list_tools()
-        return [tool.model_dump() for tool in result.tools]
+        resp, _ = await self._rpc("tools/list", {})
+        if resp.error:
+            raise resp.error
+        return resp.result.get("tools", [])
+
+    async def call_tool_blocking(self, name: str, arguments: dict | None = None) -> str:
+        """调用 UE 端工具，使用阻塞式 post() 读取完整 SSE 响应。
+
+        与 call_tool() 的 stream() + aiter_lines() 不同，此方法使用
+        httpx.post() 的 response.content 阻塞读取——等服务器在最后
+        一次 OnComplete 后关闭连接再返回。用于避开 UE HTTP Server
+        MultipleWriteStream 跨线程写入的延迟/丢失问题。
+        """
+        self._ensure_connected()
+        resp, _ = await self._rpc("tools/call", {
+            "name": name,
+            "arguments": arguments or {},
+        })
+        if resp.error:
+            raise resp.error
+        return json.dumps(resp.result, ensure_ascii=False)
 
     async def call_tool(self, name: str, arguments: dict | None = None) -> str:
-        """调用 UE 端工具，委托给 SDK ClientSession。"""
+        """调用 UE 端的指定工具，增量处理 SSE 事件流。
+
+        使用 httpx.stream() 而非 post()——post() 在非流式模式下会预读整个
+        响应体后才返回。stream() 在收到 HTTP 响应头后立即返回，
+        body 通过 aiter_lines() 增量消费。
+
+        每次 SSE 响应后显式 aclose() 关闭底层 TCP 连接，防止 httpx 连接池
+        复用导致 UE Server 的 MultipleWriteStream 与旧连接混淆。
+        """
         self._ensure_connected()
-        logger.info("调用工具: %s", name)
-        result = await self._sdk_session.call_tool(
-            name, arguments or {}
-        )
-        # 提取文本内容，保持与原有 str 返回类型的兼容
-        parts: list[str] = []
-        for item in result.content:
-            if hasattr(item, "text"):
-                parts.append(item.text)
-        return "\n".join(parts)
+
+        if arguments is None:
+            arguments = {}
+
+        rid = self._next_id()
+        payload = {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }
+
+        logger.info("调用工具: %s (id=%d)", name, rid)
+
+        response = None
+        try:
+            async with self._http.stream(
+                "POST",
+                self._config.ue_base_url,
+                json=payload,
+                headers=self._build_headers(),
+            ) as stream_response:
+                response = stream_response
+                if response.status_code != 200:
+                    await response.aread()
+                    raise JsonRpcError(
+                        -32000, f"HTTP {response.status_code}: {response.text}"
+                    )
+
+                content_type = response.headers.get("content-type", "")
+
+                if "text/event-stream" in content_type:
+                    result = await self._read_sse_stream(rid, response)
+                    await response.aclose()
+                    return result
+                elif "application/json" in content_type:
+                    await response.aread()
+                    data = response.json()
+                    if "error" in data:
+                        err = data["error"]
+                        raise JsonRpcError(
+                            err.get("code", -1),
+                            err.get("message", "Unknown error"),
+                            err.get("data"),
+                        )
+                    return json.dumps(data.get("result", {}), ensure_ascii=False)
+                else:
+                    await response.aread()
+                    raise JsonRpcError(-32000, f"未知响应类型: {content_type}")
+        except Exception:
+            if response is not None:
+                try:
+                    await response.aclose()
+                except Exception:
+                    pass
+            # if self._connected and self._session_id:
+            #     try:
+            #         await self._cancel_request(rid)
+            #     except Exception:
+            #         pass
+            raise
 
     # ---- 私有方法 ----
 
     def _ensure_connected(self) -> None:
-        if not self._connected or self._sdk_session is None:
+        if not self._connected or self._http is None:
             raise RuntimeError("未连接到 UE MCP Server。请先调用 connect()。")
 
     def _next_id(self) -> int:
@@ -352,17 +456,27 @@ class McpClientSession:
         逐行消费 SSE 流——收到最终事件后立即返回，不等待 HTTP 连接关闭。
         处理 progress 通知、多行 data、注释行。
         """
+        import time as _time
         data_parts: list[str] = []
         line_count = 0
+        t_start = _time.monotonic()
 
-        logger.debug("[sse-stream] _read_sse_stream id=%d 开始, content-type=%s",
-                     request_id,
-                     getattr(response, "headers", {}).get("content-type", "?"))
+        logger.debug(
+            "[sse-stream] id=%d 开始, ct=%s, Connection=%s",
+            request_id,
+            getattr(response, "headers", {}).get("content-type", "?"),
+            getattr(response, "headers", {}).get("connection", "?"),
+        )
 
         async for line in response.aiter_lines():
             line_count += 1
-            if line_count <= 3:
-                logger.debug("[sse-stream] id=%d line[%d]: %s", request_id, line_count, line[:120])
+            t_elapsed = _time.monotonic() - t_start
+            if line_count == 1:
+                logger.info("[sse-stream] id=%d 首行到达, 耗时=%.1fs, 内容: %s",
+                            request_id, t_elapsed, line[:120])
+            elif line_count <= 3:
+                logger.debug("[sse-stream] id=%d line[%d] (+%.1fs): %s",
+                             request_id, line_count, t_elapsed, line[:120])
             if line == "":
                 # 空行 = 事件边界，处理已累积的 data
                 if data_parts:
@@ -378,6 +492,9 @@ class McpClientSession:
                         continue
                     if "result" in data:
                         result = data["result"]
+                        t_total = _time.monotonic() - t_start
+                        logger.info("[sse-stream] id=%d 收到 result, 总耗时=%.1fs, 共 %d 行",
+                                    request_id, t_total, line_count)
                         return (
                             json.dumps(result, ensure_ascii=False)
                             if isinstance(result, dict)
@@ -412,12 +529,28 @@ class McpClientSession:
         """延迟加载模式下，预加载所有工具集。"""
         self._ensure_connected()
 
-        # 1. list_toolsets
-        try:
-            catalog_text = await self.call_tool("list_toolsets", {})
-        except Exception as e:
-            logger.warning("list_toolsets 失败: %s", e)
+        # 1. list_toolsets — 用 _rpc 直接解析 result.content[0].text
+        resp, _ = await self._rpc("tools/call", {
+            "name": "list_toolsets",
+            "arguments": {},
+        })
+
+        if resp.error:
+            logger.warning("list_toolsets 失败: %s", resp.error)
             return 0
+
+        catalog_text = ""
+        if isinstance(resp.result, dict):
+            content = resp.result.get("content", [])
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    catalog_text = item.get("text", "")
+                    break
+            if not catalog_text:
+                for key in ("text", "structuredContent"):
+                    if key in resp.result:
+                        catalog_text = str(resp.result[key])
+                        break
 
         if not catalog_text:
             logger.info("list_toolsets 返回空——可能已在 eager 模式")
@@ -436,13 +569,19 @@ class McpClientSession:
         logger.info("发现 %d 个工具集，开始预加载...", len(toolset_names))
 
         # 3. 并行预加载（工具集之间无依赖，并发加载可大幅提速）
-        async def load_one(toolset_name: str) -> bool:
+        async def load_one(name: str) -> bool:
             try:
-                logger.info("正在加载工具集: %s", toolset_name)
-                await self.call_tool("load_toolset", {"toolset_name": toolset_name})
+                logger.info("正在加载工具集: %s", name)
+                resp, _ = await self._rpc("tools/call", {
+                    "name": "load_toolset",
+                    "arguments": {"toolset_name": name},
+                })
+                if resp.error:
+                    logger.debug("加载 %s 失败: %s", name, resp.error)
+                    return False
                 return True
             except Exception as e:
-                logger.warning("加载 %s 出错: %s", toolset_name, e)
+                logger.warning("加载 %s 出错: %s", name, e)
                 return False
 
         results = await asyncio.gather(*[load_one(name) for name in toolset_names])

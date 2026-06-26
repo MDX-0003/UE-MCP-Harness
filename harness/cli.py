@@ -2,7 +2,6 @@
 
 用法:
     harness start [--ue-port PORT] [--listen-port PORT]
-    HARNESS_VISION_DEBUG=1 harness start --ue-port 8000 --listen-port 9000
     harness start --ue-port 8000 --listen-port 9000
     harness version
     harness skill create|list|delete|update <name>

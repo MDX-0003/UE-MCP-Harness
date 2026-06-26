@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "."
+		},
+		{
+			"path": "../Epic Games/UE58_Proj/MCP/Plugins/ModelContextProtocol"
 		}
 	],
 	"settings": {}

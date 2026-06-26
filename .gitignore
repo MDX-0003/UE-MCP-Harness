@@ -24,7 +24,6 @@
 *.suo
 *.opensdf
 *.sdf
-*.md
 *.VC.db
 *.VC.opendb
 SourceArt/**/*.png
