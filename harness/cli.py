@@ -135,7 +135,12 @@ def cmd_start(args: argparse.Namespace) -> int:
                 tools = await ue_client.list_tools()
                 logger.info("✓ 已获取 %d 个工具（跳过预加载）", len(tools))
 
-            # 3. L3 全量刷新 State Cache（首次连接 → Hard Boundary）
+            # 3. 创建截图专用持久 session（避免频繁 connect/close/DELETE）
+            from harness.verification.capturer import init_shot_session
+            await init_shot_session(config)
+            logger.info("✓ 截图专用 session 已就绪")
+
+            # 4. L3 全量刷新 State Cache（首次连接 → Hard Boundary）
             try:
                 await full_refresh(ue_client, _cache)
                 logger.info("✓ State Cache 已就绪")
@@ -180,6 +185,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     async def shutdown(sig: signal.Signals) -> None:
         logger.info("收到信号 %s，正在关闭...", sig.name)
+        from harness.verification.capturer import close_shot_session
+        await close_shot_session()
         await ue_client.close()
         tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
         for task in tasks:
@@ -206,6 +213,11 @@ def cmd_start(args: argparse.Namespace) -> int:
         logger.error("致命错误: %s", e)
         return 1
     finally:
+        try:
+            from harness.verification.capturer import close_shot_session
+            loop.run_until_complete(close_shot_session())
+        except Exception:
+            pass
         try:
             loop.run_until_complete(ue_client.close())
         except Exception:

@@ -6,6 +6,7 @@ FToolsetImage 返回 MimeType: "image/png" + Data: base64，Harness 零转码直
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import logging
@@ -17,6 +18,43 @@ if TYPE_CHECKING:
     from harness.client import McpClientSession
 
 logger = logging.getLogger("harness.verification.capturer")
+
+# 截图专用持久 session + 串行锁
+# init_shot_session() 在 Harness 启动时调用一次；
+# 所有 capture() 调用复用同一 session；
+# close_shot_session() 在 Harness 关闭时调用。
+_shot_client: "McpClientSession | None" = None
+_shot_lock = asyncio.Lock()
+
+
+async def init_shot_session(config: object) -> None:
+    """创建截图专用持久 MCP session。在 preload_all_toolsets 之后调用一次。
+
+    使用独立 session 避免与主 session 的 TCP 连接池状态串扰；
+    持久复用避免频繁 connect/close/DELETE 对 UE HTTPServer 状态机的刺激。
+    """
+    global _shot_client
+    from harness.client import McpClientSession as _McpClientSession
+    from harness.config import Config as _Config
+
+    shot_config = _Config(
+        ue_port=config.ue_port,
+        ue_host=config.ue_host,
+        sse_read_timeout=config.sse_read_timeout * 5,  # 默认 600s
+        preload_all_toolsets=False,
+    )
+    _shot_client = _McpClientSession(shot_config)
+    await _shot_client.connect()
+    logger.info("截图专用 session 已创建: %s", _shot_client.session_id)
+
+
+async def close_shot_session() -> None:
+    """关闭截图专用 session。Harness 关闭时调用。"""
+    global _shot_client
+    if _shot_client is not None:
+        await _shot_client.close()
+        _shot_client = None
+        logger.info("截图专用 session 已关闭")
 
 
 @dataclass
@@ -39,9 +77,9 @@ async def capture(
 ) -> Screenshot:
     """通过 MCP 获取 UE 编辑器截图。
 
-    每次截图创建独立的 MCP session + TCP 连接，用完即关。
-    这绕过了 UE HTTP Server MultipleWriteStream 在跨线程异步
-    完成时的数据丢失问题——新 session 的第一个 SSE 流总是可靠的。
+    使用截图专用持久 session + asyncio.Lock 串行化。
+    绕过了 UE HTTP Server MultipleWriteStream 在频繁 session
+    churn 下的跨线程异步数据丢失问题。
 
     mode 参数选择截图方案：
       - "viewport": CaptureAssetImage(AssetPath="") — 仅视口画面
@@ -51,27 +89,15 @@ async def capture(
     if mode not in ("viewport", "editor", "asset"):
         raise ValueError(f"无效的截图模式: {mode}，可选 viewport / editor / asset")
 
-    from harness.client import McpClientSession as _McpClientSession
-    from harness.config import Config as _Config
+    if _shot_client is None or not _shot_client.is_connected:
+        raise RuntimeError("截图 session 未初始化或已断开，请重启 Harness")
 
     b_show_ui = not hide_ui
 
-    # 创建独立 session，超时设为主 session 的 5 倍（默认 600s）。
-    # UE HTTP Server 的 MultipleWriteStream 在异步回调完成前不发送数据；
-    # 第二次截图可能因 UE 端资源竞争导致异步调度延迟 >120s。
-    shot_config = _Config(
-        ue_port=ue_client._config.ue_port,
-        ue_host=ue_client._config.ue_host,
-        sse_read_timeout=ue_client._config.sse_read_timeout * 5,
-        preload_all_toolsets=False,
-    )
-    shot_client = _McpClientSession(shot_config)
-    try:
-        await shot_client.connect()
-
+    async with _shot_lock:
         if mode == "editor":
             try:
-                result = await shot_client.call_tool(
+                result = await _shot_client.call_tool(
                     "ToolsetRegistry.EditorAppToolset.CaptureEditorImage", {}
                 )
                 if result:
@@ -82,7 +108,7 @@ async def capture(
                 logger.debug("CaptureEditorImage 失败，回退到 viewport 模式")
 
             # fallback: editor → viewport
-            result = await shot_client.call_tool(
+            result = await _shot_client.call_tool(
                 "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
                 {"AssetPath": "", "bShowUI": b_show_ui},
             )
@@ -90,13 +116,11 @@ async def capture(
 
         # viewport / asset
         path = "" if mode == "viewport" else asset_path
-        result = await shot_client.call_tool(
+        result = await _shot_client.call_tool(
             "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
             {"AssetPath": path, "bShowUI": b_show_ui},
         )
         return parse_screenshot(result, max_width, max_height)
-    finally:
-        await shot_client.close()
 
 
 def capture_from_file(path: Path, max_width: int = 1024, max_height: int = 768) -> Screenshot:

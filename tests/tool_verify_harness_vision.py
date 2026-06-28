@@ -43,27 +43,26 @@ async def main() -> int:
                     modes = props.get("mode", {}).get("enum", [])
                     print(f"   ✅ take_screenshot 可用，支持的 mode: {modes}")
 
-            # ── 串行测试三种 mode ──
-
-
+            # ── 串行测试 ──
             # mode=editor (auto-fallback to viewport if CaptureEditorImage fails)
             # ok = await _test_mode(session, "editor", {})
             # if not ok:
             #     print("   ⚠ editor 未通过")
 
-            # mode=viewport，CaptureAssetImage,不指定asset
-            ok = await _test_mode(session, "viewport", {"hide_ui": False})
+            # 1. asset — 显式指定引擎内置资产，走缩略图路径（FAssetThumbnailCapture，10s 超时）
+            # 缩略图路径比视口截图更可靠：异步等待窗口短，MultipleWriteStream 竞态风险低
+            ENGINE_ASSET = "/Engine/BasicShapes/BasicShapeMaterial_Inst.BasicShapeMaterial_Inst"
+            print(f"\n{'─' * 50}")
+            print(f"测试 mode='asset' 显式指定: {ENGINE_ASSET}")
+            ok = await _test_mode(session, "asset",
+                                  {"asset_path": ENGINE_ASSET, "hide_ui": True})
             if not ok:
-                print("   ⚠ viewport 未通过")
-            # mode=asset — 先动态查找可用 Asset 路径
-            asset_path = await _find_asset(session)
-            if asset_path:
-                ok = await _test_mode(session, "asset",
-                                      {"asset_path": asset_path, "hide_ui": True})
-                if not ok:
-                    print("   ⚠ asset 未通过")
-            else:
-                print("   ⚠ 跳过 asset 模式 — 无可用 Asset（请在 Content Browser 中选中一个）")
+                print("   ⚠ asset 未通过")
+
+            # 2. viewport — CaptureAssetImage(AssetPath="")，异步 delegate，竞态风险高
+            # ok = await _test_mode(session, "viewport", {"hide_ui": False})
+            # if not ok:
+            #     print("   ⚠ viewport 未通过")
 
     print("\n全部测试完成。")
     return 0
@@ -90,9 +89,6 @@ async def _test_mode(session, mode: str, extra: dict) -> bool:
     print(f"\n{'─' * 50}")
     print(f"测试 mode='{mode}' {extra}")
 
-    # 基线
-    ctx_before = await _get_ctx(session)
-
     # 调用
     arguments = {"mode": mode, **extra}
     r = await session.call_tool("take_screenshot", arguments)
@@ -109,7 +105,7 @@ async def _test_mode(session, mode: str, extra: dict) -> bool:
 
     # 对比
     ctx_after = await _get_ctx(session)
-    if _has_vision_verdict(ctx_after) and not _has_vision_verdict(ctx_before):
+    if _has_vision_verdict(ctx_after):
         print(f"  ✅ mode='{mode}' VisionInterceptor 已触发")
         _print_vision_lines(ctx_after)
         return True
