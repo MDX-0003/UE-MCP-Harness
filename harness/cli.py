@@ -17,6 +17,7 @@ import asyncio
 import logging
 import signal
 import sys
+from pathlib import Path
 
 
 def _setup_logging(level: str = "INFO") -> None:
@@ -62,6 +63,13 @@ def cmd_start(args: argparse.Namespace) -> int:
     config = Config.from_env().merge_cli_overrides(
         ue_port=args.ue_port,
         listen_port=args.listen_port,
+        ue_host=args.ue_host,
+        ue_project_root=(
+            Path(args.ue_project_root) if args.ue_project_root else None
+        ),
+        ue_screenshot_dir=(
+            Path(args.ue_screenshot_dir) if args.ue_screenshot_dir else None
+        ),
     )
     from harness.verification.debug import init as debug_init
     debug_init(config)
@@ -248,6 +256,14 @@ def main() -> int:
     p_start.add_argument(
         "--ue-host", type=str, default=None,
         help="UE MCP Server 地址 (默认: 127.0.0.1)"
+    )
+    p_start.add_argument(
+        "--ue-project-root", type=str, default=None,
+        help="UE 项目根目录（自动发现失败时的救援路径）"
+    )
+    p_start.add_argument(
+        "--ue-screenshot-dir", type=str, default=None,
+        help="UE 截图保存目录（硬覆盖，直接使用此路径）"
     )
     p_start.add_argument(
         "--no-preload", action="store_true",

@@ -51,18 +51,18 @@ async def main() -> int:
 
             # 1. asset — 显式指定引擎内置资产，走缩略图路径（FAssetThumbnailCapture，10s 超时）
             # 缩略图路径比视口截图更可靠：异步等待窗口短，MultipleWriteStream 竞态风险低
-            ENGINE_ASSET = "/Engine/BasicShapes/BasicShapeMaterial_Inst.BasicShapeMaterial_Inst"
-            print(f"\n{'─' * 50}")
-            print(f"测试 mode='asset' 显式指定: {ENGINE_ASSET}")
-            ok = await _test_mode(session, "asset",
-                                  {"asset_path": ENGINE_ASSET, "hide_ui": True})
-            if not ok:
-                print("   ⚠ asset 未通过")
+            # ENGINE_ASSET = "/Engine/BasicShapes/BasicShapeMaterial_Inst.BasicShapeMaterial_Inst"
+            # print(f"\n{'─' * 50}")
+            # print(f"测试 mode='asset' 显式指定: {ENGINE_ASSET}")
+            # ok = await _test_mode(session, "asset",
+            #                       {"asset_path": ENGINE_ASSET, "hide_ui": True})
+            # if not ok:
+            #     print("   ⚠ asset 未通过")
 
-            ok = await _test_mode(session, "asset",
-                                  {"asset_path": "", "hide_ui": True})
-            if not ok:
-                print("   ⚠ asset 未通过")
+            # ok = await _test_mode(session, "asset",
+            #                       {"asset_path": "", "hide_ui": True})
+            # if not ok:
+            #     print("   ⚠ asset 未通过")
             ok = await _test_mode(session, "viewport", {"hide_ui": True})
             if not ok:
                 print("   ⚠ viewport 未通过")

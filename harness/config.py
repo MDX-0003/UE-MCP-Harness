@@ -19,6 +19,12 @@ class Config:
     ue_port: int = 8000
     ue_host: str = "127.0.0.1"
 
+    # UE 项目路径 — 用于截图文件 fallback
+    # ue_screenshot_dir: 硬覆盖，直接指向截图目录
+    # ue_project_root:  救援路径，自动发现失败时拼接 Saved/Screenshots/WindowsEditor
+    ue_project_root: "Path | None" = None
+    ue_screenshot_dir: "Path | None" = None
+
     # Harness MCP Server 监听
     listen_host: str = "127.0.0.1"
     listen_port: int = 9000
@@ -75,6 +81,8 @@ class Config:
         return cls(
             ue_port=int(os.getenv("HARNESS_UE_PORT", "8000")),
             ue_host=os.getenv("HARNESS_UE_HOST", "127.0.0.1"),
+            ue_project_root=_env_optional_path("HARNESS_UE_PROJECT_ROOT"),
+            ue_screenshot_dir=_env_optional_path("HARNESS_UE_SCREENSHOT_DIR"),
             listen_host=os.getenv("HARNESS_LISTEN_HOST", "127.0.0.1"),
             listen_port=int(os.getenv("HARNESS_LISTEN_PORT", "9000")),
             mcp_protocol_version=os.getenv(
@@ -104,6 +112,8 @@ class Config:
         listen_port: int | None = None,
         ue_host: str | None = None,
         listen_host: str | None = None,
+        ue_project_root: "Path | None" = None,
+        ue_screenshot_dir: "Path | None" = None,
     ) -> Config:
         """返回合并了 CLI 覆盖的新 Config 实例。"""
         overrides: dict = {}
@@ -115,12 +125,18 @@ class Config:
             overrides["ue_host"] = ue_host
         if listen_host is not None:
             overrides["listen_host"] = listen_host
+        if ue_project_root is not None:
+            overrides["ue_project_root"] = ue_project_root
+        if ue_screenshot_dir is not None:
+            overrides["ue_screenshot_dir"] = ue_screenshot_dir
         if not overrides:
             return self
         # 直接构造新实例（Python 3.14 移除了 dataclasses.replace）
         current = {
             "ue_port": self.ue_port,
             "ue_host": self.ue_host,
+            "ue_project_root": self.ue_project_root,
+            "ue_screenshot_dir": self.ue_screenshot_dir,
             "listen_host": self.listen_host,
             "listen_port": self.listen_port,
             "mcp_protocol_version": self.mcp_protocol_version,
@@ -135,6 +151,7 @@ class Config:
             "vision_api_key": self.vision_api_key,
             "vision_api_base_url": self.vision_api_base_url,
             "vision_model": self.vision_model,
+            "vision_max_size": self.vision_max_size,
         }
         current.update(overrides)
         return Config(**current)
@@ -143,6 +160,21 @@ class Config:
 def _default_log_dir() -> Path:
     """默认日志目录——仓库根目录下的 .ue-harness/logs。"""
     return Path(__file__).resolve().parent.parent / ".ue-harness" / "logs"
+
+
+def _env_optional_path(key: str) -> "Path | None":
+    """读取可选的环境变量作为 Path，不存在或为空时返回 None。
+
+    相对路径会以当前工作目录为基准 resolve 为绝对路径，
+    并在日志中打印 resolve 结果，避免从不同 cwd 启动时悄悄指错目录。
+    """
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    return p.resolve()
 
 
 def _load_dotenv() -> None:

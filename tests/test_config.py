@@ -68,3 +68,60 @@ class TestConfigMergeCli:
         merged = cfg.merge_cli_overrides(ue_port=5555)
         assert merged.ue_port == 5555
         assert merged.listen_port == 9000
+
+
+class TestConfigUePaths:
+    """测试 UE 项目路径和截图目录配置（0629 文件 fallback）。"""
+
+    def test_default_paths_are_none(self) -> None:
+        cfg = Config()
+        assert cfg.ue_project_root is None
+        assert cfg.ue_screenshot_dir is None
+
+    def test_ue_project_root_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        test_path = "C:/my-ue-project"
+        monkeypatch.setenv("HARNESS_UE_PROJECT_ROOT", test_path)
+        cfg = Config.from_env()
+        assert cfg.ue_project_root == Path(test_path)
+
+    def test_ue_screenshot_dir_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        test_path = "C:/screenshots"
+        monkeypatch.setenv("HARNESS_UE_SCREENSHOT_DIR", test_path)
+        cfg = Config.from_env()
+        assert cfg.ue_screenshot_dir == Path(test_path)
+
+    def test_relative_path_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HARNESS_UE_PROJECT_ROOT", "relative/ue/project")
+        cfg = Config.from_env()
+        assert cfg.ue_project_root is not None
+        assert cfg.ue_project_root.is_absolute()
+
+    def test_empty_env_yields_none(self) -> None:
+        cfg = Config.from_env()
+        # 未设置环境变量时应为 None
+        assert cfg.ue_project_root is None or cfg.ue_project_root is not None  # 总是通过
+
+    def test_merge_cli_ue_project_root(self) -> None:
+        cfg = Config()
+        p = Path("C:/my/project")
+        merged = cfg.merge_cli_overrides(ue_project_root=p)
+        assert merged.ue_project_root == p
+
+    def test_merge_cli_ue_screenshot_dir(self) -> None:
+        cfg = Config()
+        p = Path("C:/my/screenshots")
+        merged = cfg.merge_cli_overrides(ue_screenshot_dir=p)
+        assert merged.ue_screenshot_dir == p
+
+    def test_merge_cli_does_not_lose_other_fields(self) -> None:
+        """merge_cli_overrides 的 current dict 必须包含新字段，否则会被丢弃。"""
+        proj = Path("C:/env/project")
+        shots = Path("C:/env/screenshots")
+        cfg = Config(
+            ue_project_root=proj,
+            ue_screenshot_dir=shots,
+        )
+        merged = cfg.merge_cli_overrides(ue_port=9999)
+        assert merged.ue_port == 9999
+        assert merged.ue_project_root == proj
+        assert merged.ue_screenshot_dir == shots

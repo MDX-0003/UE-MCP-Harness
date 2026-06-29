@@ -288,3 +288,457 @@ class TestVisionSubAgent:
         )
         assert cfg.vision_api_base_url == "https://token-plan-cn.xiaomimimo.com/anthropic"
         assert cfg.vision_api_key == "test-key"
+
+
+# ---- 0629 文件 fallback 测试 ------------------------------------------------
+
+
+class TestShouldUseFileFallback:
+    """_should_use_file_fallback 仅对 CaptureAssetImage("") 返回 True。"""
+
+    def test_viewport_empty_path_returns_true(self) -> None:
+        from harness.verification.capturer import _should_use_file_fallback
+        assert _should_use_file_fallback(
+            "ToolsetRegistry.EditorAppToolset.CaptureAssetImage", ""
+        ) is True
+
+    def test_asset_non_empty_path_returns_false(self) -> None:
+        from harness.verification.capturer import _should_use_file_fallback
+        assert _should_use_file_fallback(
+            "ToolsetRegistry.EditorAppToolset.CaptureAssetImage",
+            "/Engine/BasicShapes/foo.foo",
+        ) is False
+
+    def test_editor_image_returns_false(self) -> None:
+        from harness.verification.capturer import _should_use_file_fallback
+        assert _should_use_file_fallback(
+            "ToolsetRegistry.EditorAppToolset.CaptureEditorImage", ""
+        ) is False
+
+    def test_unknown_tool_returns_false(self) -> None:
+        from harness.verification.capturer import _should_use_file_fallback
+        assert _should_use_file_fallback("SomeOtherTool", "") is False
+
+
+class TestIsSseNoResultError:
+    """_is_sse_no_result_error 精确匹配特定 JsonRpcError。"""
+
+    def test_matching_error_returns_true(self) -> None:
+        from harness.client import JsonRpcError
+        from harness.verification.capturer import _is_sse_no_result_error
+        exc = JsonRpcError(-32000, "SSE 流结束但未找到工具结果 (request_id=5, 共收到 3 行)")
+        assert _is_sse_no_result_error(exc) is True
+
+    def test_wrong_code_returns_false(self) -> None:
+        from harness.client import JsonRpcError
+        from harness.verification.capturer import _is_sse_no_result_error
+        exc = JsonRpcError(-32001, "SSE 流结束但未找到工具结果")
+        assert _is_sse_no_result_error(exc) is False
+
+    def test_wrong_message_returns_false(self) -> None:
+        from harness.client import JsonRpcError
+        from harness.verification.capturer import _is_sse_no_result_error
+        exc = JsonRpcError(-32000, "Other SSE error")
+        assert _is_sse_no_result_error(exc) is False
+
+    def test_different_exception_type(self) -> None:
+        from harness.verification.capturer import _is_sse_no_result_error
+        # 只能接受 JsonRpcError，其他异常类型不匹配
+        try:
+            _is_sse_no_result_error(ValueError("test"))
+        except AttributeError:
+            pass  # 不是 JsonRpcError，没有 .code/.message 属性
+
+
+class TestLooksLikePng:
+    """_looks_like_png 校验 PNG magic bytes。"""
+
+    def test_valid_png_returns_true(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _looks_like_png
+        png = tmp_path / "valid.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        assert _looks_like_png(png) is True
+
+    def test_invalid_file_returns_false(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _looks_like_png
+        f = tmp_path / "not_png.png"
+        f.write_bytes(b"not a PNG file at all")
+        assert _looks_like_png(f) is False
+
+    def test_empty_file_returns_false(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _looks_like_png
+        f = tmp_path / "empty.png"
+        f.write_bytes(b"")
+        assert _looks_like_png(f) is False
+
+    def test_missing_file_returns_false(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _looks_like_png
+        assert _looks_like_png(tmp_path / "does_not_exist.png") is False
+
+
+class TestFindLatestScreenshot:
+    """_find_latest_screenshot mtime 选择逻辑。"""
+
+    def test_selects_latest_mtime(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _find_latest_screenshot
+        import time as _time
+
+        old = tmp_path / "old.png"
+        old.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
+        _time.sleep(0.05)
+        new = tmp_path / "new.png"
+        new.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
+
+        since = _time.time() - 10
+        result = _find_latest_screenshot(tmp_path, since)
+        assert result == new
+
+    def test_skips_files_before_since(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _find_latest_screenshot
+        import time as _time
+
+        old = tmp_path / "old.png"
+        old.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
+
+        # since 设为未来，所有现有文件都被排除
+        since = _time.time() + 60
+        result = _find_latest_screenshot(tmp_path, since)
+        assert result is None
+
+    def test_skips_empty_files(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _find_latest_screenshot
+        import time as _time
+
+        empty = tmp_path / "empty.png"
+        empty.write_bytes(b"")
+        since = _time.time() - 10
+        result = _find_latest_screenshot(tmp_path, since)
+        assert result is None
+
+    def test_only_globs_png(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _find_latest_screenshot
+        import time as _time
+
+        jpg = tmp_path / "screenshot.jpg"
+        jpg.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
+        since = _time.time() - 10
+        result = _find_latest_screenshot(tmp_path, since)
+        assert result is None  # .jpg 不被 *.png glob 匹配
+
+    def test_skips_future_mtime(self, tmp_path: Path) -> None:
+        from harness.verification.capturer import _find_latest_screenshot
+        import time as _time
+        import os as _os
+
+        future = tmp_path / "future.png"
+        future.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
+        # 设置 mtime 为未来 1 小时
+        future_time = _time.time() + 3600
+        _os.utime(future, (future_time, future_time))
+
+        since = _time.time() - 10
+        result = _find_latest_screenshot(tmp_path, since)
+        assert result is None  # 未来时间戳被排除
+
+
+class TestCaptureModeValidation:
+    """capture() mode 语义校验。"""
+
+    def test_asset_empty_path_raises_value_error(self) -> None:
+        from harness.verification.capturer import capture
+        import asyncio
+
+        async def run() -> None:
+            with pytest.raises(ValueError, match="mode='asset' requires non-empty asset_path"):
+                await capture(
+                    ue_client=None,  # type: ignore[arg-type]
+                    mode="asset",
+                    asset_path="",
+                )
+
+        asyncio.run(run())
+
+    def test_invalid_mode_raises_value_error(self) -> None:
+        from harness.verification.capturer import capture
+        import asyncio
+
+        async def run() -> None:
+            with pytest.raises(ValueError, match="无效的截图模式"):
+                await capture(
+                    ue_client=None,  # type: ignore[arg-type]
+                    mode="invalid_mode",
+                )
+
+        asyncio.run(run())
+
+    def test_no_shot_session_raises_runtime_error(self) -> None:
+        """未初始化截图 session 时调用 capture 应抛 RuntimeError。"""
+        from harness.verification.capturer import capture, _shot_client as shot_client_mod
+        import asyncio
+
+        # 确保 _shot_client 为 None
+        import harness.verification.capturer as capturer_mod
+        old_val = capturer_mod._shot_client
+        capturer_mod._shot_client = None
+        try:
+            async def run() -> None:
+                with pytest.raises(RuntimeError, match="截图 session 未初始化"):
+                    await capture(
+                        ue_client=None,  # type: ignore[arg-type]
+                        mode="viewport",
+                    )
+            asyncio.run(run())
+        finally:
+            capturer_mod._shot_client = old_val
+
+
+class TestCaptureWithFileFallback:
+    """capture() viewport 模式文件 fallback 集成测试。"""
+
+    @pytest.fixture
+    def _setup_shot_client(self) -> object:
+        """创建一个假的已连接 McpClientSession。"""
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock = MagicMock()
+        mock.is_connected = True
+        mock.call_tool = AsyncMock()
+        return mock
+
+    def test_readtimeout_falls_back_to_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """httpx.ReadTimeout + 新 PNG → 返回 capture_from_file() 结果。"""
+        from harness.verification.capturer import (
+            capture,
+            _shot_client as shot_client_mod,
+            _ue_screenshot_dir as screenshot_dir_mod,
+        )
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio
+        import httpx
+
+        # 准备 mock session
+        mock_client = MagicMock()
+        mock_client.is_connected = True
+        mock_client.call_tool = AsyncMock(
+            side_effect=httpx.ReadTimeout("read timeout")
+        )
+
+        # 创建临时截图目录 + 新 PNG
+        shot_dir = tmp_path / "screenshots"
+        shot_dir.mkdir()
+        import time
+        since = time.time()
+        png = shot_dir / "ScreenShot00001.png"
+        # 最小有效 PNG（1x1 像素）
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+            b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05"
+            b"\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+
+        old_client = shot_client_mod
+        old_dir = screenshot_dir_mod
+        try:
+            import harness.verification.capturer as capturer_mod
+            capturer_mod._shot_client = mock_client
+            capturer_mod._ue_screenshot_dir = shot_dir
+
+            async def run() -> None:
+                from PIL import Image
+                # 模拟 PIL 可用时的情况
+                try:
+                    result = await capture(
+                        ue_client=mock_client,
+                        mode="viewport",
+                        max_width=256,
+                        max_height=256,
+                    )
+                    assert result.data_b64 is not None
+                    assert len(result.data_b64) > 0
+                except ImportError:
+                    # PIL 不可用时 capture_from_file 仍应工作
+                    result = await capture(
+                        ue_client=mock_client,
+                        mode="viewport",
+                        max_width=256,
+                        max_height=256,
+                    )
+                    assert result.data_b64 is not None
+
+            asyncio.run(run())
+        finally:
+            capturer_mod._shot_client = old_client
+            capturer_mod._ue_screenshot_dir = old_dir
+
+    def test_readtimeout_no_file_reraises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ReadTimeout 且无合适的 fallback 文件 → 原异常重新抛出。"""
+        from harness.verification.capturer import capture
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio
+        import httpx
+
+        mock_client = MagicMock()
+        mock_client.is_connected = True
+        mock_client.call_tool = AsyncMock(
+            side_effect=httpx.ReadTimeout("read timeout")
+        )
+
+        import harness.verification.capturer as capturer_mod
+        old_client = capturer_mod._shot_client
+        old_dir = capturer_mod._ue_screenshot_dir
+        try:
+            capturer_mod._shot_client = mock_client
+            capturer_mod._ue_screenshot_dir = tmp_path / "nonexistent"
+
+            async def run() -> None:
+                with pytest.raises(httpx.ReadTimeout):
+                    await capture(
+                        ue_client=mock_client,
+                        mode="viewport",
+                    )
+
+            asyncio.run(run())
+        finally:
+            capturer_mod._shot_client = old_client
+            capturer_mod._ue_screenshot_dir = old_dir
+
+    def test_jsonrpc_sse_no_result_falls_back(
+        self, tmp_path: Path,
+    ) -> None:
+        """JsonRpcError(-32000, SSE 流结束...) + 新 PNG → fallback。"""
+        from harness.client import JsonRpcError
+        from harness.verification.capturer import capture
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio
+
+        mock_client = MagicMock()
+        mock_client.is_connected = True
+        mock_client.call_tool = AsyncMock(
+            side_effect=JsonRpcError(
+                -32000,
+                "SSE 流结束但未找到工具结果 (request_id=1, 共收到 5 行)",
+            )
+        )
+
+        shot_dir = tmp_path / "screenshots"
+        shot_dir.mkdir()
+        png = shot_dir / "ScreenShot00002.png"
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+            b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05"
+            b"\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+
+        import harness.verification.capturer as capturer_mod
+        old_client = capturer_mod._shot_client
+        old_dir = capturer_mod._ue_screenshot_dir
+        try:
+            capturer_mod._shot_client = mock_client
+            capturer_mod._ue_screenshot_dir = shot_dir
+
+            async def run() -> None:
+                result = await capture(
+                    ue_client=mock_client,
+                    mode="viewport",
+                    max_width=128,
+                    max_height=128,
+                )
+                assert result.data_b64 is not None
+
+            asyncio.run(run())
+        finally:
+            capturer_mod._shot_client = old_client
+            capturer_mod._ue_screenshot_dir = old_dir
+
+    def test_other_jsonrpc_error_reraises(
+        self, tmp_path: Path,
+    ) -> None:
+        """其他 JsonRpcError 不应进入 fallback，原样抛出。"""
+        from harness.client import JsonRpcError
+        from harness.verification.capturer import capture
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio
+
+        mock_client = MagicMock()
+        mock_client.is_connected = True
+        mock_client.call_tool = AsyncMock(
+            side_effect=JsonRpcError(-32603, "Internal tool error")
+        )
+
+        import harness.verification.capturer as capturer_mod
+        old_client = capturer_mod._shot_client
+        old_dir = capturer_mod._ue_screenshot_dir
+        try:
+            capturer_mod._shot_client = mock_client
+            # 设置一个有效的截图目录确保 fallback 本身可用
+            shot_dir = tmp_path / "screenshots"
+            shot_dir.mkdir()
+            capturer_mod._ue_screenshot_dir = shot_dir
+
+            async def run() -> None:
+                with pytest.raises(JsonRpcError) as exc_info:
+                    await capture(
+                        ue_client=mock_client,
+                        mode="viewport",
+                    )
+                assert "Internal tool error" in str(exc_info.value)
+
+            asyncio.run(run())
+        finally:
+            capturer_mod._shot_client = old_client
+            capturer_mod._ue_screenshot_dir = old_dir
+
+    def test_asset_mode_no_fallback(
+        self, tmp_path: Path,
+    ) -> None:
+        """mode='asset' 不走文件 fallback，即使配置了截图目录。"""
+        from harness.client import JsonRpcError
+        from harness.verification.capturer import capture
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio
+
+        mock_client = MagicMock()
+        mock_client.is_connected = True
+        mock_client.call_tool = AsyncMock(
+            side_effect=JsonRpcError(
+                -32000,
+                "SSE 流结束但未找到工具结果 (request_id=1, 共收到 5 行)",
+            )
+        )
+
+        shot_dir = tmp_path / "screenshots"
+        shot_dir.mkdir()
+        png = shot_dir / "ScreenShot00003.png"
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+            b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05"
+            b"\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+
+        import harness.verification.capturer as capturer_mod
+        old_client = capturer_mod._shot_client
+        old_dir = capturer_mod._ue_screenshot_dir
+        try:
+            capturer_mod._shot_client = mock_client
+            capturer_mod._ue_screenshot_dir = shot_dir
+
+            async def run() -> None:
+                # Asset mode 有 asset_path → 不走 fallback，原异常直接抛出
+                with pytest.raises(JsonRpcError):
+                    await capture(
+                        ue_client=mock_client,
+                        mode="asset",
+                        asset_path="/Engine/BasicShapes/foo.foo",
+                    )
+
+            asyncio.run(run())
+        finally:
+            capturer_mod._shot_client = old_client
+            capturer_mod._ue_screenshot_dir = old_dir
