@@ -59,10 +59,13 @@ async def main() -> int:
             if not ok:
                 print("   ⚠ asset 未通过")
 
-            # 2. viewport — CaptureAssetImage(AssetPath="")，异步 delegate，竞态风险高
-            # ok = await _test_mode(session, "viewport", {"hide_ui": False})
-            # if not ok:
-            #     print("   ⚠ viewport 未通过")
+            ok = await _test_mode(session, "asset",
+                                  {"asset_path": "", "hide_ui": True})
+            if not ok:
+                print("   ⚠ asset 未通过")
+            ok = await _test_mode(session, "viewport", {"hide_ui": True})
+            if not ok:
+                print("   ⚠ viewport 未通过")
 
     print("\n全部测试完成。")
     return 0
