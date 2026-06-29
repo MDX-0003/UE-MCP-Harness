@@ -1,13 +1,10 @@
 {
 	"folders": [
 		{
-			"path": "../UE/UE_5.8/Engine/Plugins/Experimental/Toolsets"
-		},
-		{
 			"path": "."
 		},
 		{
-			"path": "../Epic Games/UE58_Proj/MCP/Plugins/ModelContextProtocol"
+			"path": "../UE_5.8/Engine/Plugins/Experimental/ModelContextProtocol"
 		}
 	],
 	"settings": {}

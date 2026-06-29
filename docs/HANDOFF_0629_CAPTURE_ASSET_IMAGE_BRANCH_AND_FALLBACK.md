@@ -2,9 +2,11 @@
 
 日期：2026-06-29
 
-状态：建议执行 Harness 侧 fallback 改动。新的证据已经把问题范围从“所有 `CaptureAssetImage` 都不稳定”收窄到“空路径或当前关卡路径触发的 viewport 截图分支更容易在连续调用后丢 final SSE result”。显式指定非关卡资产 object path 时，工具走资产缩略图分支，目前多次调用稳定。
+状态：建议执行 Harness 侧 fallback 改动。新的证据已经把问题范围从”所有 `CaptureAssetImage` 都不稳定”收窄到”空路径或当前关卡路径触发的 viewport 截图分支更容易在连续调用后丢 final SSE result”。显式指定非关卡资产 object path 时，工具走资产缩略图分支，目前多次调用稳定。
 
 写作方式：按 `code-to-article` 的混合模式组织。前半部分先解释链路和机制，后半部分给源码位置、改动点和测试计划。
+
+**路径约定：** 本文档不使用绝对路径。Harness 仓库文件相对于 `UE-MCP-Harness` 根目录；UE Engine 源码/插件相对于 UE Engine 安装目录下的 `Engine/` 目录；UE 项目文件相对于项目根目录，记为 `{UE_PROJECT_ROOT}`。
 
 ## 结论先行
 
@@ -62,7 +64,7 @@ EnumAddFlags(Response->Flags,
 OnComplete(MoveTemp(Response));
 ```
 
-代码位置：`D:\Programs\2024-2\Epic Games\UE58_Proj\MCP\Plugins\ModelContextProtocol\Source\ModelContextProtocol\Private\ModelContextProtocolServer.cpp:867-877`
+代码位置：`{UE_PROJECT_ROOT}/Plugins/ModelContextProtocol/Source/ModelContextProtocol/Private/ModelContextProtocolServer.cpp:867-877`
 
 工具完成后再写 final frame：
 
@@ -85,7 +87,7 @@ HasAdditionalWrites = 1 << 1,
 SkipHeaderWrite = 1 << 2,
 ```
 
-代码位置：`D:\Programs\2024-2\UE\UE_5.8\Engine\Source\Runtime\Online\HTTPServer\Public\HttpServerResponse.h:20-30`
+代码位置：`Source/Runtime/Online/HTTPServer/Public/HttpServerResponse.h:20-30`（Engine 目录下）
 
 关键 TCP 规则是：HTTPServer 写入是异步状态机，不是函数调用栈返回值。第一次写带 `HasAdditionalWrites`，连接写完后会回到等待下一次写的状态；最后一次写不带 `HasAdditionalWrites`，连接才回到普通读请求状态或关闭。
 
@@ -100,7 +102,7 @@ else
 }
 ```
 
-代码位置：`D:\Programs\2024-2\UE\UE_5.8\Engine\Source\Runtime\Online\HTTPServer\Private\HttpConnection.cpp:276-288`
+代码位置：`Source/Runtime/Online/HTTPServer/Private/HttpConnection.cpp:276-288`（Engine 目录下）
 
 Harness 这边正在用 `httpx.stream()` 和 `aiter_lines()` 等 final SSE frame：
 
@@ -111,7 +113,7 @@ if "text/event-stream" in content_type:
     return result
 ```
 
-代码位置：`D:\Programs\2024-2\ue-agent-harness\harness\client.py:261-264`
+代码位置：`harness/client.py:261-264`
 
 因此当前现象可以精确表述为：UE tool 已经执行到截图完成，甚至可能已经调用了第二次 `OnComplete`，但 Harness 没有读到 final SSE body，于是 `aiter_lines()` 一直等到 read timeout。
 
@@ -131,7 +133,7 @@ if (AssetPath.IsEmpty() ||
 }
 ```
 
-代码位置：`D:\Programs\2024-2\UE\UE_5.8\Engine\Plugins\Experimental\ToolsetRegistry\Source\ToolsetRegistry\Private\ToolsetRegistry\EditorAppToolset.cpp:389-392`
+代码位置：`Plugins/Experimental/ToolsetRegistry/Source/ToolsetRegistry/Private/ToolsetRegistry/EditorAppToolset.cpp:389-392`（Engine 目录下）
 
 这个分支做的事不是查一个默认资产，而是启动 editor viewport 截图。它先拿到当前 Level Editor viewport，注册截图完成 delegate，然后发起截图请求：
 
@@ -170,7 +172,7 @@ FString FPaths::ScreenShotDir()
 }
 ```
 
-代码位置：`D:\Programs\2024-2\UE\UE_5.8\Engine\Source\Runtime\Core\Private\Misc\Paths.cpp:553-556`
+代码位置：`Source/Runtime/Core/Private/Misc/Paths.cpp:553-556`（Engine 目录下）
 
 编辑器的默认截图保存目录会被初始化为这个路径：
 
@@ -178,7 +180,7 @@ FString FPaths::ScreenShotDir()
 GameScreenshotSaveDirectory.Path = FPaths::ScreenShotDir();
 ```
 
-代码位置：`D:\Programs\2024-2\UE\UE_5.8\Engine\Source\Runtime\Engine\Private\GameEngine.cpp:945`
+代码位置：`Source/Runtime/Engine/Private/GameEngine.cpp:945`（Engine 目录下）
 
 在 viewport 截图处理阶段，UE 既广播 `OnScreenshotCaptured()`，也调用保存逻辑：
 
@@ -187,7 +189,7 @@ FScreenshotRequest::OnScreenshotCaptured().Broadcast(...);
 bIsScreenshotSaved = RequestSaveScreenshot(bWriteAlpha, Bitmap, BitmapSize, 255);
 ```
 
-代码位置：`D:\Programs\2024-2\UE\UE_5.8\Engine\Source\Editor\UnrealEd\Private\EditorViewportClient.cpp:7048-7066`
+代码位置：`Source/Editor/UnrealEd/Private/EditorViewportClient.cpp:7048-7066`（Engine 目录下）
 
 这就是 fallback 成立的根基：即使 Harness 没读到 final SSE result，viewport 分支仍可能已经把截图文件写到了项目 `Saved/Screenshots/WindowsEditor`。
 
@@ -300,7 +302,7 @@ result = await _shot_client.call_tool(
 )
 ```
 
-代码位置：`D:\Programs\2024-2\ue-agent-harness\harness\verification\capturer.py:118-123`
+代码位置：`harness/verification/capturer.py:118-123`
 
 所以需要补一个输入语义保护：`mode="asset"` 时如果 `asset_path` 为空，应该直接报错，或者显式改成 `mode="viewport"`。不要让“asset 模式”静默退化成 viewport 分支。
 
@@ -325,7 +327,7 @@ LogCore: Display: Tracing Screenshot "ScreenShot00037" taken with size: 1318 x 6
 当前项目截图目录也已经有连续文件：
 
 ```text
-D:\Programs\2024-2\Epic Games\UE58_Proj\MCP\Saved\Screenshots\WindowsEditor
+{UE_PROJECT_ROOT}/Saved/Screenshots/WindowsEditor
 ScreenShot00046.png
 ScreenShot00045.png
 ScreenShot00044.png
@@ -343,7 +345,7 @@ def capture_from_file(path: Path, max_width: int = 1024, max_height: int = 768) 
     b64 = base64.b64encode(data).decode("ascii")
 ```
 
-代码位置：`D:\Programs\2024-2\ue-agent-harness\harness\verification\capturer.py:126-145`
+代码位置：`harness/verification/capturer.py:126-145`
 
 因此 fallback 的实现不是新建一条 Vision 图片通道，而是复用已有的本地文件转 base64、resize、`Screenshot` dataclass、`VisionInterceptor` 机制。
 
@@ -406,14 +408,14 @@ except (httpx.ReadTimeout, asyncio.TimeoutError, TimeoutError) as exc:
 用户当前项目截图目录是：
 
 ```text
-D:\Programs\2024-2\Epic Games\UE58_Proj\MCP\Saved\Screenshots\WindowsEditor
+{UE_PROJECT_ROOT}/Saved/Screenshots/WindowsEditor
 ```
 
 这个路径可以拆成：
 
 ```text
 UE project root:
-D:\Programs\2024-2\Epic Games\UE58_Proj\MCP
+{UE_PROJECT_ROOT}
 
 UE screenshot relative path:
 Saved\Screenshots\WindowsEditor
@@ -442,8 +444,8 @@ def resolved_ue_screenshot_dir(self) -> Path | None:
 推荐环境变量：
 
 ```text
-HARNESS_UE_PROJECT_ROOT=D:\Programs\2024-2\Epic Games\UE58_Proj\MCP
-HARNESS_UE_SCREENSHOT_DIR=D:\Programs\2024-2\Epic Games\UE58_Proj\MCP\Saved\Screenshots\WindowsEditor
+HARNESS_UE_PROJECT_ROOT=<your-ue-project-root>
+HARNESS_UE_SCREENSHOT_DIR=<your-ue-project-root>\Saved\Screenshots\WindowsEditor
 ```
 
 `HARNESS_UE_SCREENSHOT_DIR` 用于覆盖默认拼接；`HARNESS_UE_PROJECT_ROOT` 用于最常见场景。两者都支持相对路径，但要明确相对谁解析：
@@ -451,19 +453,19 @@ HARNESS_UE_SCREENSHOT_DIR=D:\Programs\2024-2\Epic Games\UE58_Proj\MCP\Saved\Scre
 1. 如果 Harness 总是从 repo 根目录启动，可以允许：
 
 ```text
-HARNESS_UE_PROJECT_ROOT=..\Epic Games\UE58_Proj\MCP
+HARNESS_UE_PROJECT_ROOT=..\..\MyUEProject
 ```
 
 2. 在代码里用 `Path(value).expanduser()`，如果不是绝对路径，则相对 `Path.cwd()` resolve。
 3. 日志里打印 resolve 后的绝对路径，避免以后从别的 cwd 启动时悄悄指错目录。
 
-不要把 `D:\Programs\2024-2\Epic Games\UE58_Proj\MCP` 写死进 `capturer.py`。这是当前机器上的项目路径，不是 harness 的通用配置。
+不要把具体机器的项目路径写死进 `capturer.py`。这是当前机器上的项目路径，不是 harness 的通用配置。
 
 ## 具体改动计划
 
 ### 改动 1：配置层支持 UE 项目根和截图目录
 
-要改的文件：`D:\Programs\2024-2\ue-agent-harness\harness\config.py`
+要改的文件：`harness/config.py`
 
 当前 `Config` 只有 UE host/port、Harness listen port、timeout、vision、log dir。没有 UE project root 或 screenshot dir。
 
@@ -485,7 +487,7 @@ ue_screenshot_dir=_env_path("HARNESS_UE_SCREENSHOT_DIR"),
 
 ### 改动 2：CLI 支持显式传路径
 
-要改的文件：`D:\Programs\2024-2\ue-agent-harness\harness\cli.py`
+要改的文件：`harness/cli.py`
 
 当前 `cmd_start()` 只把 `ue_port`、`listen_port` 传进 `merge_cli_overrides()`：
 
@@ -521,7 +523,7 @@ config = Config.from_env().merge_cli_overrides(
 
 ### 改动 3：capturer 增加 latest screenshot fallback
 
-要改的文件：`D:\Programs\2024-2\ue-agent-harness\harness\verification\capturer.py`
+要改的文件：`harness/verification/capturer.py`
 
 当前已有：
 
@@ -647,7 +649,7 @@ source=file_fallback
 1. 启动 Harness：
 
 ```powershell
-harness start --ue-port 8000 --listen-port 9000 --ue-project-root "D:\Programs\2024-2\Epic Games\UE58_Proj\MCP"
+harness start --ue-port 8000 --listen-port 9000 --ue-project-root "<your-ue-project-root>"
 ```
 
 2. 连续跑显式资产路径：
@@ -719,13 +721,13 @@ take_screenshot {"mode": "viewport", "hide_ui": true}
 当前用户项目根：
 
 ```text
-D:\Programs\2024-2\Epic Games\UE58_Proj\MCP
+{UE_PROJECT_ROOT}
 ```
 
 当前用户截图目录：
 
 ```text
-D:\Programs\2024-2\Epic Games\UE58_Proj\MCP\Saved\Screenshots\WindowsEditor
+{UE_PROJECT_ROOT}/Saved/Screenshots/WindowsEditor
 ```
 
-不要硬编码这两个绝对路径；它们只用于本机验证和默认配置示例。
+不要硬编码绝对路径；路径因机器而异。接手项目时请自行确认本机上的 UE 项目根目录和截图目录。
