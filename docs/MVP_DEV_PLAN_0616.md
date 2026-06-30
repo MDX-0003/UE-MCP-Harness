@@ -1,4 +1,4 @@
-# Harness MVP 闭环开发计划 — 2026-06-16
+# Harness MVP 闭环开发计划 — 2026-06-16（更新于 2026-06-30）
 
 ## 当前状态总览
 
@@ -9,14 +9,14 @@
 | 003 | 可观测性 | ✅ | 23 tests | ✅ | JSONL 日志 + stats + replay |
 | 004 | Context Assembly | ✅ | 21 tests | ✅ | 工具过滤 + 三层 Provider + get_context |
 | 005 | Skill 系统 | ✅ | 31 tests | ✅ | CRUD + match + activate/deactivate/save |
-| 006 | Vision Pipeline | ✅ | 24 tests | ⚠️ | CLI 可用，**未接入 MCP 循环** |
-| 007 | 验证闭环 | ❌ | — | ❌ | 依赖 005+006 |
+| 006 | Vision Pipeline | ✅ | 24 tests | ✅ | capturer 三种 mode + file fallback + auto-discovery |
+| 007 | 验证闭环 | ✅ | 25 tests | ✅ | VisionInterceptor → WorldState → get_context |
 | 008 | State Cache | ✅ | 18 tests | ✅ | L1 write-through + L3 refresh |
-| 009 | 任务记忆 | ❌ | — | ❌ | 依赖 002+005+008 |
+| 009 | 任务记忆 | ❌ | — | ❌ | 依赖 005+008（002 已就绪） |
 | 010 | 错误恢复 | ⬜ | — | — | **跳过** |
-| 011 | 安全护栏 | ❌ | — | ❌ | 依赖 002 |
+| 011 | 安全护栏 | ❌ | — | ❌ | 待开发 |
 
-**全量测试**：137 unit tests passed + L3 e2e 7/7 passed
+**全量测试**：223 unit tests passed + L3 e2e 7/7 passed
 
 ---
 

@@ -2,7 +2,7 @@
 
 MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外是 MCP Server（LLM 连接入口），对内是 MCP Client（连接 UE MCP Server）。提供上下文组装、状态缓存、视觉验证闭环、任务记忆压缩、安全护栏。
 
-## 当前状态 (2026-06-16)
+## 当前状态 (2026-06-30)
 
 | Issue | 模块 | 状态 |
 |:---:|------|:---:|
@@ -11,14 +11,14 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 | 003 | 可观测性 (JSONL 日志 + stats + replay) | ✅ 23 tests |
 | 004 | Context Assembly (工具过滤 + 三层 Provider) | ✅ 21 tests |
 | 005 | Skill 系统 (CRUD + match + activate) | ✅ 31 tests |
-| 006 | Vision Pipeline (capturer + vision_agent) | ✅ 24 tests, ⚠️ 未接入 MCP 循环 |
-| 007 | 验证闭环 (VisionInterceptor → MCP 循环) | ❌ **当前开发** |
+| 006 | Vision Pipeline (capturer + vision_agent) | ✅ 已接入 MCP 循环 |
+| 007 | 验证闭环 (VisionInterceptor → MCP 循环) | ✅ 三种截图 mode 成立，file fallback 就绪 |
 | 008 | State Cache (L1 write-through + L3 refresh) | ✅ 18 tests |
-| 009 | 任务记忆 (压缩 + 注入) | ❌ 依赖 002+005+008 |
+| 009 | 任务记忆 (压缩 + 注入) | ❌ 待开发 |
 | 010 | 错误恢复 | ⬜ 跳过 |
-| 011 | 安全护栏 | ❌ 依赖 002 |
+| 011 | 安全护栏 | ❌ 待开发 |
 
-**全量测试：137 unit tests + L3 e2e 7/7 passed**
+**全量测试：223 unit tests (137→223) + L3 e2e 7/7 passed**
 
 ## 架构
 
