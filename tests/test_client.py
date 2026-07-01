@@ -82,6 +82,55 @@ class TestSseParser:
         assert data["message"] == "你好世界"
 
 
+# ---- 工具结果提取测试 -------------------------------------------------------
+
+
+def test_extract_text_from_result_normal() -> None:
+    """正常 MCP text content 格式 → 正确提取文本。"""
+    from harness.client import _extract_text_from_result
+    result = json.dumps({"content": [{"type": "text", "text": "Hello World"}]})
+    assert _extract_text_from_result(result) == "Hello World"
+
+
+def test_extract_text_from_result_multiline_text() -> None:
+    """多行文本（如 list_toolsets 返回的工具集列表）→ 完整提取。"""
+    from harness.client import _extract_text_from_result
+    catalog = "- SceneTools: desc\n- ActorTools: desc\n"
+    result = json.dumps({"content": [{"type": "text", "text": catalog}]})
+    assert "SceneTools" in _extract_text_from_result(result)
+    assert "ActorTools" in _extract_text_from_result(result)
+
+
+def test_extract_text_from_result_iserror() -> None:
+    """isError 为 true 的返回 → 仍能提取文本（用于 load_toolset 错误处理）。"""
+    from harness.client import _extract_text_from_result
+    result = json.dumps({
+        "content": [{"type": "text", "text": "Toolset not found"}],
+        "isError": True
+    })
+    assert _extract_text_from_result(result) == "Toolset not found"
+
+
+def test_extract_text_from_result_plain_string() -> None:
+    """非 JSON 字符串 → 原样返回。"""
+    from harness.client import _extract_text_from_result
+    assert _extract_text_from_result("plain text") == "plain text"
+
+
+def test_extract_text_from_result_empty_content() -> None:
+    """空 content 数组 → 返回空字符串。"""
+    from harness.client import _extract_text_from_result
+    result = json.dumps({"content": []})
+    assert _extract_text_from_result(result) == ""
+
+
+def test_extract_text_from_result_no_text_content() -> None:
+    """content 中没有 text 类型 → 返回空字符串。"""
+    from harness.client import _extract_text_from_result
+    result = json.dumps({"content": [{"type": "image", "data": "base64..."}]})
+    assert _extract_text_from_result(result) == ""
+
+
 # ---- 流式 SSE 读取测试 -----------------------------------------------------
 
 

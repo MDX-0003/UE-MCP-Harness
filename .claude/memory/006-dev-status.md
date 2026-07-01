@@ -29,6 +29,7 @@ metadata:
 | 009 | 任务记忆 (压缩 + 注入) | ❌ 依赖 005+008 已就绪 |
 | 010 | 错误恢复 | ⬜ 跳过 |
 | 011 | 安全护栏 | ❌ 待开发 |
+| 012 | 连接健康检测 (ping + 自动重连) | ❌ 详见 docs/issues/012-connection-health.md |
 
 ## 当前 interceptor 链顺序
 ```

@@ -62,6 +62,27 @@ def parse_sse_stream(raw: bytes) -> list[SseEvent]:
     return events
 
 
+def _extract_text_from_result(result_str: str) -> str:
+    """从 MCP tool call 返回的 JSON 字符串中提取第一个 text content。
+
+    处理格式: {"content": [{"type": "text", "text": "..."}, ...], ...}
+    返回提取的文本，失败时返回空字符串。
+    """
+    try:
+        result = json.loads(result_str)
+    except json.JSONDecodeError:
+        return result_str
+    if isinstance(result, dict):
+        content = result.get("content", [])
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                return item.get("text", "")
+        for key in ("text", "structuredContent"):
+            if key in result:
+                return str(result[key])
+    return ""
+
+
 # ---- JSON-RPC 2.0 消息 ----------------------------------------------------
 
 
@@ -526,31 +547,20 @@ class McpClientSession:
         )
 
     async def preload_all_toolsets(self) -> int:
-        """延迟加载模式下，预加载所有工具集。"""
+        """延迟加载模式下，预加载所有工具集。
+
+        使用 call_tool() 的 SSE 流式读取（而非 _rpc 的阻塞 POST），
+        正确处理 UE MCP Server 的 MultipleWriteStream + keep-alive 连接。
+        """
         self._ensure_connected()
 
-        # 1. list_toolsets — 用 _rpc 直接解析 result.content[0].text
-        resp, _ = await self._rpc("tools/call", {
-            "name": "list_toolsets",
-            "arguments": {},
-        })
-
-        if resp.error:
-            logger.warning("list_toolsets 失败: %s", resp.error)
+        # 1. list_toolsets — 用 call_tool 的 SSE 流式读取
+        try:
+            result_str = await self.call_tool("list_toolsets", {})
+            catalog_text = _extract_text_from_result(result_str)
+        except Exception as e:
+            logger.warning("list_toolsets 失败: %s", e)
             return 0
-
-        catalog_text = ""
-        if isinstance(resp.result, dict):
-            content = resp.result.get("content", [])
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    catalog_text = item.get("text", "")
-                    break
-            if not catalog_text:
-                for key in ("text", "structuredContent"):
-                    if key in resp.result:
-                        catalog_text = str(resp.result[key])
-                        break
 
         if not catalog_text:
             logger.info("list_toolsets 返回空——可能已在 eager 模式")
@@ -572,12 +582,12 @@ class McpClientSession:
         async def load_one(name: str) -> bool:
             try:
                 logger.info("正在加载工具集: %s", name)
-                resp, _ = await self._rpc("tools/call", {
-                    "name": "load_toolset",
-                    "arguments": {"toolset_name": name},
-                })
-                if resp.error:
-                    logger.debug("加载 %s 失败: %s", name, resp.error)
+                result_str = await self.call_tool("load_toolset",
+                                                   {"toolset_name": name})
+                result = json.loads(result_str)
+                if isinstance(result, dict) and result.get("isError"):
+                    err_text = _extract_text_from_result(result_str)
+                    logger.warning("加载 %s 失败: %s", name, err_text[:200])
                     return False
                 return True
             except Exception as e:
