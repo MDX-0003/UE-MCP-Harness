@@ -40,7 +40,7 @@ _ue_screenshot_dir: "Path | None" = None
 
 
 async def init_shot_session(config: object) -> None:
-    """创建截图专用持久 MCP session。在 preload_all_toolsets 之后调用一次。
+    """创建截图专用持久 MCP session。可重复调用——内部先关闭旧 session 再重建。
 
     使用独立 session 避免与主 session 的 TCP 连接池状态串扰；
     持久复用避免频繁 connect/close/DELETE 对 UE HTTPServer 状态机的刺激。
@@ -48,6 +48,11 @@ async def init_shot_session(config: object) -> None:
     同时执行一次截图目录自动发现并缓存结果（失败不阻断启动）。
     """
     global _shot_client, _ue_screenshot_dir
+
+    # 幂等：已存在则先关闭
+    if _shot_client is not None:
+        await close_shot_session()
+
     from harness.client import McpClientSession as _McpClientSession
     from harness.config import Config as _Config
 
@@ -115,8 +120,10 @@ async def capture(
             "empty path captures the viewport, use mode='viewport' instead"
         )
 
-    if _shot_client is None or not _shot_client.is_connected:
-        raise RuntimeError("截图 session 未初始化或已断开，请重启 Harness")
+    if _shot_client is None:
+        raise RuntimeError("截图 session 未初始化，请重启 Harness")
+    # _connected 检查已移除 — _ensure_connected() (Issue 012) 在 call_tool()
+    # 内部处理重连，外部守卫会阻断急救路径。
 
     b_show_ui = not hide_ui
 

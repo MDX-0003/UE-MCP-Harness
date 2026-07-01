@@ -17,9 +17,9 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 | 009 | 任务记忆 (压缩 + 注入) | ❌ 待开发 |
 | 010 | 错误恢复 | ⬜ 跳过 |
 | 011 | 安全护栏 | ❌ 待开发 |
-| 012 | 连接健康检测 (ping + 自动重连) | ❌ 待开发 |
+| 012 | 连接健康检测 (ping + 自动重连) | ✅ 23 tests | 详见 docs/HANDOFF_0701_ISSUE_012_CONNECTION_HEALTH.md |
 
-**全量测试：233 unit tests + L3 e2e 7/7 passed**
+**全量测试：252 unit tests (233→252) + L3 e2e 7/7 passed**
 
 ## 架构
 

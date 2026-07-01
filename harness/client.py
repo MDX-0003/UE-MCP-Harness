@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from collections.abc import Callable, Awaitable
 from typing import Any
 import asyncio
 import httpx
@@ -117,6 +118,7 @@ class McpClientSession:
         self._session_id: str = ""
         self._negotiated_version: str = ""
         self._connected: bool = False
+        self._on_reconnect: list[Callable[[], Awaitable[None]]] = []
 
     # ---- 连接生命周期 ----
 
@@ -198,6 +200,55 @@ class McpClientSession:
         self._session_id = ""
         logger.info("已断开 UE MCP Server 连接。")
 
+    async def reconnect(self) -> None:
+        """重新连接到 UE MCP Server。
+
+        步骤：清理旧连接 → 完整 MCP 握手 → 通知所有关注者（钩子链）。
+        旧 session 已随 UE 进程消失，不做 DELETE。
+        """
+        if self._http is not None:
+            try:
+                await self._http.aclose()
+            except Exception:
+                pass
+            self._http = None
+
+        self._session_id = ""
+        self._negotiated_version = ""
+        self._request_id = 0
+
+        await self.connect()
+
+        for hook in self._on_reconnect:
+            try:
+                await hook()
+            except Exception as e:
+                logger.warning(
+                    "重连回调 %s 失败（非致命）: %s",
+                    getattr(hook, "__name__", hook), e,
+                )
+
+    def add_reconnect_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
+        """注册重连成功后的回调。按注册顺序同步执行。
+
+        钩子在 reconnect() 末尾、_ensure_connected() 返回之前执行。
+        单个钩子失败不阻断后续钩子或原工具调用。
+        """
+        self._on_reconnect.append(hook)
+
+    async def ping(self, timeout: float = 3.0) -> bool:
+        """轻量存活检测——确认 UE MCP Server 进程是否在监听端口。
+
+        使用独立 httpx 客户端，不依赖 self._http 或 self._session_id。
+        """
+        try:
+            async with asyncio.timeout(timeout):
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.get(self._config.ue_base_url)
+                    return resp.status_code < 500
+        except Exception:
+            return False
+
     @property
     def is_connected(self) -> bool:
         return self._connected
@@ -214,7 +265,7 @@ class McpClientSession:
 
     async def list_tools(self) -> list[dict]:
         """获取 UE 端所有可用工具的列表。"""
-        self._ensure_connected()
+        await self._ensure_connected()
         resp, _ = await self._rpc("tools/list", {})
         if resp.error:
             raise resp.error
@@ -228,7 +279,7 @@ class McpClientSession:
         一次 OnComplete 后关闭连接再返回。用于避开 UE HTTP Server
         MultipleWriteStream 跨线程写入的延迟/丢失问题。
         """
-        self._ensure_connected()
+        await self._ensure_connected()
         resp, _ = await self._rpc("tools/call", {
             "name": name,
             "arguments": arguments or {},
@@ -247,7 +298,7 @@ class McpClientSession:
         每次 SSE 响应后显式 aclose() 关闭底层 TCP 连接，防止 httpx 连接池
         复用导致 UE Server 的 MultipleWriteStream 与旧连接混淆。
         """
-        self._ensure_connected()
+        await self._ensure_connected()
 
         if arguments is None:
             arguments = {}
@@ -273,6 +324,15 @@ class McpClientSession:
                 response = stream_response
                 if response.status_code != 200:
                     await response.aread()
+                    # 502/503/504 = 代理/网关层报告后端不可达，等价于连接断开
+                    if response.status_code in (502, 503, 504):
+                        self._connected = False
+                        raise JsonRpcError(
+                            -32000,
+                            "与 UE MCP Server 的连接已断开（HTTP "
+                            f"{response.status_code}）。"
+                            "请确认 UE 编辑器正在运行且 MCP Server 已启动。",
+                        )
                     raise JsonRpcError(
                         -32000, f"HTTP {response.status_code}: {response.text}"
                     )
@@ -297,24 +357,64 @@ class McpClientSession:
                 else:
                     await response.aread()
                     raise JsonRpcError(-32000, f"未知响应类型: {content_type}")
+        except httpx.ConnectError:
+            self._connected = False
+            if response is not None:
+                try:
+                    await response.aclose()
+                except Exception:
+                    pass
+            raise
+        except httpx.ReadTimeout:
+            # UE 大概率活着，工具执行超时。不翻 _connected。
+            if response is not None:
+                try:
+                    await response.aclose()
+                except Exception:
+                    pass
+            if self._connected and self._session_id:
+                try:
+                    await self._cancel_request(rid)
+                except Exception:
+                    pass
+            raise
+        except httpx.RemoteProtocolError:
+            # 灰色地带：先 ping 确认
+            if response is not None:
+                try:
+                    await response.aclose()
+                except Exception:
+                    pass
+            if not await self.ping(timeout=2.0):
+                self._connected = False
+            raise
         except Exception:
             if response is not None:
                 try:
                     await response.aclose()
                 except Exception:
                     pass
-            # if self._connected and self._session_id:
-            #     try:
-            #         await self._cancel_request(rid)
-            #     except Exception:
-            #         pass
             raise
 
     # ---- 私有方法 ----
 
-    def _ensure_connected(self) -> None:
-        if not self._connected or self._http is None:
-            raise RuntimeError("未连接到 UE MCP Server。请先调用 connect()。")
+    async def _ensure_connected(self) -> None:
+        """确认与 UE MCP Server 的连接有效。
+
+        快速路径：_connected=True + _http 存在 → 直接通过（零 I/O）
+        急救路径：_connected=False → ping 确认 UE 恢复 → 自动重连
+        失败路径：ping 不通 → 抛 RuntimeError
+        """
+        if self._connected and self._http is not None:
+            return
+
+        if not await self.ping(timeout=2.0):
+            raise RuntimeError(
+                "与 UE MCP Server 的连接已断开。"
+                "请确认 UE 编辑器正在运行且 MCP Server 已启动，然后重试。"
+            )
+
+        await self.reconnect()
 
     def _next_id(self) -> int:
         self._request_id += 1
@@ -411,6 +511,8 @@ class McpClientSession:
             )
 
         if response.status_code != 200:
+            if response.status_code in (502, 503, 504):
+                self._connected = False
             return (
                 JsonRpcResponse(
                     id=rid,
@@ -552,7 +654,7 @@ class McpClientSession:
         使用 call_tool() 的 SSE 流式读取（而非 _rpc 的阻塞 POST），
         正确处理 UE MCP Server 的 MultipleWriteStream + keep-alive 连接。
         """
-        self._ensure_connected()
+        await self._ensure_connected()
 
         # 1. list_toolsets — 用 call_tool 的 SSE 流式读取
         try:

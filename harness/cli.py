@@ -56,6 +56,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     from harness.verification.vision_agent import VisionSubAgent
     from harness.verification.interceptor import VisionInterceptor
     from harness.observability.snapshotter import SnapshotRecorder
+    from harness.verification.capturer import init_shot_session, close_shot_session
 
     # 加载 Vision 配置（.vision.env）
     load_vision_env()
@@ -93,6 +94,18 @@ def cmd_start(args: argparse.Namespace) -> int:
     _active_skill_ref: list[dict | None] = [None]
     # take_screenshot 工具写入，VisionInterceptor / SnapshotRecorder 读取
     _pending_screenshot_ref: list = [None]  # list[harness.verification.capturer.Screenshot | None]
+
+    # 012 重连钩子 — 主 session 重连后自动恢复截图 session + State Cache
+    async def _rebuild_shot_session() -> None:
+        await init_shot_session(config)
+        logger.info("截图 session 已随主 session 重建")
+
+    async def _refresh_cache_on_reconnect() -> None:
+        await full_refresh(ue_client, _cache)
+        logger.info("State Cache 已随重连刷新")
+
+    ue_client.add_reconnect_hook(_rebuild_shot_session)
+    ue_client.add_reconnect_hook(_refresh_cache_on_reconnect)
 
     async def run() -> None:
         nonlocal session_id
@@ -161,17 +174,23 @@ def cmd_start(args: argparse.Namespace) -> int:
                                   snapshot_recorder=snapshot_recorder,
                                   pending_screenshot_ref=_pending_screenshot_ref)
 
-            # 初始化 instructions：列出可用 Skill
+            # 初始化 instructions：列出可用 Skill（含触发词，供 LLM 匹配用户意图）
             skill_registry = SkillRegistry()
             skill_registry.load_skills()
             skills = skill_registry.list_skills()
-            skill_list = "\n".join(
-                f"  - {s.name}: {s.description}" for s in skills
-            ) if skills else "  (无已安装 Skill)"
+            if skills:
+                lines: list[str] = ["可用 Skill（用户提及触发词时自动激活对应 Skill）："]
+                for s in skills:
+                    lines.append(f"  - {s.name}: {s.description}")
+                    triggers_str = ", ".join(s.triggers)
+                    lines.append(f"    触发词: {triggers_str}")
+                skill_list = "\n".join(lines)
+            else:
+                skill_list = "  (无已安装 Skill)"
             instructions = (
                 "你是 UE Editor Agent，通过 Harness 中间层连接 Unreal Engine 5.8。\n"
                 "自由探索模式下可用约 20 个核心工具。\n"
-                f"可用 Skill:\n{skill_list}\n"
+                f"{skill_list}\n"
                 "调 activate_skill <名称> 激活 Skill，调 deactivate_skill 退出。\n"
                 "调 get_context 获取最新 UE 状态快照和活跃 Skill 进度。"
             )

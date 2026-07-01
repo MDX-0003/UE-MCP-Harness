@@ -44,7 +44,7 @@ class StateCacheInterceptor(ToolCallInterceptor):
         if handler is None:
             short = event.name.split(".")[-1] if "." in event.name else event.name
             for full_name, h in self._handlers.items():
-                if full_name.endswith(short):
+                if full_name.split(".")[-1] == short:
                     handler = h
                     logger.debug("短名 fallback 匹配: %s → %s", event.name, full_name)
                     break
