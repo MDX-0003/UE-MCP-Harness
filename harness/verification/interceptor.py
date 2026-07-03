@@ -5,6 +5,9 @@ ToolCallInterceptor 的 post_call 实现：
   自动从返回结果提取 base64 图像数据，调用 VisionSubAgent 进行视觉验证，
   结果写入 WorldState.last_vision_verdict，供 get_context 消费。
 
+Issue 015 修订：对接 VisionSessionManager，不再直接调用 VisionSubAgent。
+  自动截图触发仍有 Vision 分析，但 Session 管理由 VisionSessionManager 负责。
+
 设计约束：
   - 仅覆盖 post_call，不改变工具调用结果
   - Vision 分析失败不阻断主链路（异常在 post_call 内捕获）
@@ -16,12 +19,15 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
 from harness.state.models import WorldState
 from harness.verification.capturer import parse_screenshot, Screenshot
 from harness.verification.vision_agent import VisionSubAgent
+
+if TYPE_CHECKING:
+    from harness.verification.session import VisionSessionManager
 
 logger = logging.getLogger("harness.verification.interceptor")
 
@@ -36,13 +42,18 @@ _SCREENSHOT_KEYWORDS = frozenset({
 class VisionInterceptor(ToolCallInterceptor):
     """截图工具调用后自动触发 Vision 分析。
 
-    post_call 中检测截图工具，提取图片数据，调用 VisionSubAgent.check()，
+    post_call 中检测截图工具，提取图片数据，调用 Vision 分析，
     结果写入 WorldState.last_vision_verdict。
 
+    Issue 015: 可选择对接 VisionSessionManager。
+    有 SessionManager 时通过 Session API 调用；无 SessionManager 时保留旧路径。
+
     Args:
-        vision_agent: VisionSubAgent 实例（独立 LLM API 客户端）。
+        vision_agent: VisionSubAgent 实例（旧路径，保留向后兼容）。
         cache: 全局 WorldState 实例。
         get_active_skill: 可选 callback，返回当前活跃 Skill dict 或 None。
+        get_pending_screenshot: 可选 callback，返回待处理的 Screenshot。
+        session_manager: 可选 VisionSessionManager（Issue 015 新路径）。
     """
 
     def __init__(
@@ -51,11 +62,13 @@ class VisionInterceptor(ToolCallInterceptor):
         cache: WorldState,
         get_active_skill: Callable[[], dict | None] | None = None,
         get_pending_screenshot: Callable[[], Screenshot | None] | None = None,
+        session_manager: "VisionSessionManager | None" = None,
     ) -> None:
         self._vision = vision_agent
         self._cache = cache
         self._get_active_skill = get_active_skill or (lambda: None)
         self._get_pending_screenshot = get_pending_screenshot or (lambda: None)
+        self._session_mgr = session_manager
 
     # ---- ToolCallInterceptor ----
 
@@ -95,13 +108,35 @@ class VisionInterceptor(ToolCallInterceptor):
                 expected = verification.get("expected") or None
                 tolerance = verification.get("tolerance", 0.7)
 
-        # 调用 Vision Sub-Agent
+        # 从 event.args 中提取针对性提问（Issue 015: question 参数）
+        question = event.args.get("question", "") if event.args else ""
+
+        # 调用 Vision 分析
         try:
-            verdict = await self._vision.check(
-                image_b64,
-                expected=expected,
-                tolerance=tolerance,
-            )
+            if self._session_mgr is not None:
+                # Issue 015 新路径：通过 SessionManager
+                if event.name in ("take_screenshot", "vision_screenshot"):
+                    meta = {
+                        "width": 0, "height": 0, "mode": event.args.get("mode", "viewport") if event.args else "viewport"
+                    }
+                    verdict = await self._session_mgr.add_screenshot(
+                        image_b64, meta, question=question,
+                    )
+                else:
+                    # UE 原生截图工具 → SessionManager 旧路径
+                    meta = {"width": 0, "height": 0, "mode": "unknown"}
+                    verdict = await self._session_mgr.add_screenshot(
+                        image_b64, meta, question=question,
+                    )
+            else:
+                # 旧路径：直接调 VisionSubAgent
+                verdict = await self._vision.check(
+                    image_b64,
+                    expected=expected,
+                    tolerance=tolerance,
+                    question=question,
+                )
+
             self._cache.last_vision_verdict = {
                 "pass": verdict.pass_,
                 "reason": verdict.reason,

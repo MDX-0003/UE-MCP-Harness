@@ -116,6 +116,10 @@ def _handle_set_transform(cache: WorldState, event: ToolCallCompleted) -> None:
         if actor_name not in cache.actors:
             cache.actors[actor_name] = _new_snapshot(actor_name)
         cache.actors[actor_name].transform = event.args.get("xform", {})
+        cache.dirty_actors.add(actor_name)
+    # Issue 015: 记录到 Recent Writes Buffer
+    from harness.verification.session import record_write
+    record_write("set_actor_transform", event.args)
 
 
 def _handle_set_properties(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -124,13 +128,15 @@ def _handle_set_properties(cache: WorldState, event: ToolCallCompleted) -> None:
     if actor_name:
         if actor_name not in cache.actors:
             cache.actors[actor_name] = _new_snapshot(actor_name)
-        # 解析 JSON 属性并合并
+        cache.dirty_actors.add(actor_name)
         import json
         try:
             props = json.loads(json_str) if isinstance(json_str, str) else json_str
             cache.actors[actor_name].properties.update(props)
         except (json.JSONDecodeError, TypeError):
             pass
+    from harness.verification.session import record_write
+    record_write("set_properties", event.args)
 
 
 def _handle_add_to_scene(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -141,12 +147,20 @@ def _handle_add_to_scene(cache: WorldState, event: ToolCallCompleted) -> None:
         actor_name = event.args.get("actor_name", event.args.get("name", ""))
     if actor_name:
         cache.actors[actor_name] = _new_snapshot(actor_name)
+        cache.dirty_actors.add(actor_name)
+    from harness.verification.session import record_write
+    # 区分 class 和 asset 来源
+    write_name = "add_to_scene_from_class"
+    record_write(write_name, event.args)
 
 
 def _handle_remove_from_scene(cache: WorldState, event: ToolCallCompleted) -> None:
     actor_name = event.args.get("actor", {}).get("name", event.args.get("name", ""))
     if actor_name and actor_name in cache.actors:
         cache.actors[actor_name].deleted = True
+        cache.dirty_actors.add(actor_name)
+    from harness.verification.session import record_write
+    record_write("remove_from_scene", event.args)
 
 
 def _handle_set_label(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -156,6 +170,9 @@ def _handle_set_label(cache: WorldState, event: ToolCallCompleted) -> None:
         if actor_name not in cache.actors:
             cache.actors[actor_name] = _new_snapshot(actor_name)
         cache.actors[actor_name].label = label
+        cache.dirty_actors.add(actor_name)
+    from harness.verification.session import record_write
+    record_write("set_label", event.args)
 
 
 def _handle_add_tag(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -166,6 +183,9 @@ def _handle_add_tag(cache: WorldState, event: ToolCallCompleted) -> None:
             cache.actors[actor_name] = _new_snapshot(actor_name)
         if tag not in cache.actors[actor_name].tags:
             cache.actors[actor_name].tags.append(tag)
+        cache.dirty_actors.add(actor_name)
+    from harness.verification.session import record_write
+    record_write("add_tag", event.args)
 
 
 def _handle_remove_tag(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -176,6 +196,9 @@ def _handle_remove_tag(cache: WorldState, event: ToolCallCompleted) -> None:
             cache.actors[actor_name].tags.remove(tag)
         except ValueError:
             pass
+        cache.dirty_actors.add(actor_name)
+    from harness.verification.session import record_write
+    record_write("remove_tag", event.args)
 
 
 def _handle_add_component(cache: WorldState, event: ToolCallCompleted) -> None:

@@ -53,12 +53,14 @@ def build_server(
     skill_ref: list[dict | None] | None = None,
     snapshot_recorder: Any | None = None,
     pending_screenshot_ref: list[Any] | None = None,
+    vision_session_manager: Any | None = None,
 ) -> Server:
     """构建 MCP Server 实例。
 
     Args:
         config: Harness 配置。
         ue_client: 已连接的 UE MCP Client。
+        vision_session_manager: 可选 VisionSessionManager（Issue 015）。
         interceptors: ToolCallInterceptor 列表。
         context_providers: ContextProvider 列表。
         world_state: 共享 WorldState 实例（008 填充，get_context 消费）。
@@ -223,6 +225,77 @@ def build_server(
             },
         ))
 
+        # Issue 015: Vision Session 工具
+        result.append(Tool(
+            name="vision_screenshot",
+            description=(
+                "获取 UE 编辑器截图，追加到当前 Vision Session，可选附带针对性提问。"
+                "如无活跃 Session 则自动创建。系统会自动注入场景上下文（dirty actors、"
+                "最近操作记录）。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["viewport", "editor", "asset"],
+                        "description": "截图模式。viewport=仅视口画面；editor=合成编辑器窗口；asset=资产缩略图",
+                        "default": "viewport",
+                    },
+                    "asset_path": {"type": "string", "description": "仅 mode=asset 时有效"},
+                    "hide_ui": {"type": "boolean", "description": "隐藏编辑器 UI 覆盖层", "default": False},
+                    "question": {
+                        "type": "string",
+                        "description": "可选。针对本次截图的首次提问。如 '所有立方体对齐了吗？'。Vision 会自动获得场景上下文。"
+                    },
+                },
+            },
+        ))
+        result.append(Tool(
+            name="vision_ask",
+            description=(
+                "在当前 Vision Session 中追问（不截新图）。复用 Session 内所有截图和对话历史。"
+                "系统自动附带最新场景上下文。必须先调 vision_screenshot 创建 Session。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "追问的具体问题。Vision 可引用之前的对话上下文。"
+                    },
+                },
+                "required": ["question"],
+            },
+        ))
+        result.append(Tool(
+            name="vision_tell",
+            description=(
+                "向当前 Vision Session 注入 LLM 的意图或预期（系统无法自动推断的信息）。"
+                "不触发 API 调用。如需注入系统已知的数据（Actor 状态、修改记录），系统会自动完成。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "info": {
+                        "type": "string",
+                        "description": "任务级意图或预期。如：'目标是傍晚暖色光照，色温应为 4000K'。"
+                    },
+                },
+                "required": ["info"],
+            },
+        ))
+        result.append(Tool(
+            name="vision_reset",
+            description="关闭当前 Vision Session（归档到日志），开启新 Session。在新任务开始或场景发生根本变化时调用。",
+            inputSchema={"type": "object", "properties": {}},
+        ))
+        result.append(Tool(
+            name="vision_status",
+            description="查看当前 Vision Session 摘要：时长、截图数、提问数、上次结论。",
+            inputSchema={"type": "object", "properties": {}},
+        ))
+
         logger.info("LLM tools/list: 返回 %d 个工具（全量 %d 个，过滤后 + Harness 自有）",
                      len(result), len(_cached_raw_tools))
         return result
@@ -338,8 +411,76 @@ def build_server(
                 type="text", text="当前未激活任何 Skill，已在自由探索模式。",
             )])
 
-        if name == "take_screenshot":
-            """Harness 截图工具 — 通过 capturer.capture() 统一获取截图。"""
+        # ---- Issue 015: Vision Session 工具 ----
+
+        if name == "vision_ask":
+            if vision_session_manager is None:
+                return CallToolResult(content=[TextContent(
+                    type="text", text="Vision Session Manager 未初始化。",
+                )], isError=True)
+            question = arguments.get("question", "")
+            if not question.strip():
+                return CallToolResult(content=[TextContent(
+                    type="text", text="question 参数不能为空。",
+                )], isError=True)
+            try:
+                verdict = await vision_session_manager.ask(question)
+            except ValueError as e:
+                return CallToolResult(content=[TextContent(
+                    type="text", text=str(e),
+                )], isError=True)
+            # 注入过期警告
+            warning = vision_session_manager.check_warning()
+            result_text = verdict.reason
+            if warning:
+                result_text = warning + "\n\n" + result_text
+            return CallToolResult(content=[TextContent(type="text", text=result_text)])
+
+        if name == "vision_tell":
+            if vision_session_manager is None:
+                return CallToolResult(content=[TextContent(
+                    type="text", text="Vision Session Manager 未初始化。",
+                )], isError=True)
+            info = arguments.get("info", "")
+            if not info.strip():
+                return CallToolResult(content=[TextContent(
+                    type="text", text="info 参数不能为空。",
+                )], isError=True)
+            vision_session_manager.tell(info)
+            return CallToolResult(content=[TextContent(
+                type="text", text=f"已注入上下文到 Vision Session（{len(info)} 字符）。"
+            )])
+
+        if name == "vision_reset":
+            if vision_session_manager is None:
+                return CallToolResult(content=[TextContent(
+                    type="text", text="Vision Session Manager 未初始化。",
+                )], isError=True)
+            old_session = vision_session_manager.get_active()
+            vision_session_manager.reset()
+            if old_session:
+                return CallToolResult(content=[TextContent(
+                    type="text", text=f"Vision Session {old_session.id} 已关闭并归档。新 Session 已创建。"
+                )])
+            return CallToolResult(content=[TextContent(
+                type="text", text="新 Vision Session 已创建。"
+            )])
+
+        if name == "vision_status":
+            if vision_session_manager is None:
+                return CallToolResult(content=[TextContent(
+                    type="text", text="Vision Session Manager 未初始化。",
+                )], isError=True)
+            return CallToolResult(content=[TextContent(
+                type="text", text=vision_session_manager.status_text(),
+            )])
+
+        if name in ("take_screenshot", "vision_screenshot"):
+            """Harness 截图工具 — 通过 capturer.capture() 统一获取截图。
+
+            vision_screenshot (Issue 015): 追加截图到当前 Vision Session + 可选针对性提问。
+            take_screenshot (旧名): 保留兼容，等同于 vision_screenshot。
+            """
             from harness.verification.capturer import capture as capturer_capture
             t0 = time.monotonic()
             try:
@@ -361,18 +502,18 @@ def build_server(
                 if pending_screenshot_ref is not None:
                     pending_screenshot_ref[0] = None
                 from harness.verification.debug import log_exception
-                log_exception(e, "take_screenshot")
+                log_exception(e, name)
                 return CallToolResult(
                     content=[TextContent(type="text",
                         text=f"截图失败: {type(e).__name__}: {e}")],
                     isError=True,
                 )
 
-            # 手动触发 post 拦截器链 — take_screenshot 不经过 UE 透传路径，
+            # 手动触发 post 拦截器链 — 不经过 UE 透传路径，
             # 必须在此处让 VisionInterceptor / SnapshotRecorder 消费截图结果
             duration_ms = (time.monotonic() - t0) * 1000
             event = ToolCallCompleted(
-                name="take_screenshot",
+                name=name,  # 保留原始工具名供 interceptor 路由
                 args=arguments,
                 raw_result={"content": [{"type": "text", "text": result_text}]},
                 parsed_text=result_text,
@@ -385,7 +526,7 @@ def build_server(
                 except Exception as e:
                     logger.error("后拦截 %s 失败: %s", type(ic).__name__, e)
 
-            # 008 / 007: 将 Vision 分析结果追加到返回值，避免 LLM 漏看
+            # 008 / 007 / 015: 将 Vision 分析结果 + Session 状态追加到返回值
             vision_info = ""
             if world_state is not None and world_state.last_vision_verdict:
                 v = world_state.last_vision_verdict
@@ -394,7 +535,20 @@ def build_server(
                 vision_info = f"\n\n[Vision 分析] {status}\n{reason}"
                 if v.get("adjustment"):
                     vision_info += f"\n调整建议: {v['adjustment']}"
-                logger.debug("take_screenshot 返回值中携带 Vision 分析结果")
+
+            # Issue 015: 注入 Session 状态和过期警告
+            if vision_session_manager is not None:
+                session = vision_session_manager.get_active()
+                if session is not None:
+                    session_info = (
+                        f"\n\nSession: {session.id} "
+                        f"(截图 #{session.screenshot_count}，"
+                        f"累计 {session.question_count} 次提问)"
+                    )
+                    result_text += session_info
+                    warning = vision_session_manager.check_warning()
+                    if warning:
+                        vision_info = warning + "\n" + vision_info if vision_info else warning
 
             return CallToolResult(
                 content=[TextContent(type="text", text=result_text + vision_info)]

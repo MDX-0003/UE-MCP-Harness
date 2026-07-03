@@ -23,6 +23,19 @@ from harness.config import Config
 
 logger = logging.getLogger("harness.verification.vision_agent")
 
+# Vision Sub-Agent 的系统 prompt — 针对性提问模式（有 question 时，优先使用）
+VISION_SYSTEM_PROMPT_QUESTION = """你是一个 Unreal Engine 编辑器截图分析器。
+你会收到编辑器截图和一个具体问题。请针对问题直接回答，基于截图中可见的内容。
+
+回答要求：
+- 直接、准确、基于截图可见内容
+- 如果截图无法回答该问题，明确说明"从截图中无法判断"并解释原因
+- 如果需要更多信息才能回答，说明需要什么
+- 如果问题涉及与场景上下文的比对（如"某 Actor 是否在预期位置"），请明确比对结果
+- 回答中可以引用场景上下文中提供的 Actor 名称和属性
+
+不需要 JSON 格式，直接回答即可。"""
+
 # Vision Sub-Agent 的系统 prompt — 自由描述模式（无预期描述时）
 VISION_SYSTEM_PROMPT_DESCRIBE = """你是一个 Unreal Engine 编辑器截图分析器。
 你会收到编辑器截图，请用中文描述截图中的场景内容。关注：
@@ -82,6 +95,8 @@ class VisionSubAgent:
         expected: str | None = None,
         tolerance: float = 0.7,
         extra_context: str = "",
+        question: str = "",
+        scene_context: str = "",
     ) -> VisionVerdict:
         """发送截图给 Vision model，返回结构化判断。
 
@@ -90,19 +105,37 @@ class VisionSubAgent:
             expected: 预期场景描述。None 或空字符串时走自由描述模式。
             tolerance: 容忍度阈值（0-1），仅在验证模式下使用。
             extra_context: 额外上下文（如追问回答）。
+            question: 针对性提问。有值时走提问模式（优先级高于 expected）。
+            scene_context: 场景上下文（从 WorldState 构建），注入 user message 供 Vision 参照。
 
         Returns:
             VisionVerdict 结构化判断结果。
         """
         self._call_count += 1
 
-        # 判断模式
-        is_verify = bool(expected and expected != "描述截图内容")
-
-        if is_verify:
+        # 三层优先级：question > expected > describe
+        if question:
+            # 针对性提问模式 — 自由文本回答
+            user_message = f"问题：{question}"
+            if scene_context:
+                user_message += f"\n\n{scene_context}"
+            is_verify = False
+        elif expected and expected != "描述截图内容":
+            # 验证模式 — JSON pass/fail
             user_message = f"预期场景：{expected}\n容忍度：{tolerance}"
+            if scene_context:
+                user_message += f"\n\n{scene_context}"
+            is_verify = True
         else:
+            # 自由描述模式
             user_message = "请描述这张截图中的场景内容。"
+            if scene_context:
+                user_message += (
+                    f"\n\n{scene_context}\n\n"
+                    "请结合以上场景上下文描述截图内容，注意比对预期与实际的差异。"
+                )
+            is_verify = False
+
         if extra_context:
             user_message += f"\n补充信息：{extra_context}"
 
@@ -124,7 +157,9 @@ class VisionSubAgent:
         })
 
         try:
-            response = await _call_vision_api(self.config, messages, verify_mode=is_verify)
+            response = await _call_vision_api(
+                self.config, messages, verify_mode=is_verify, question=question,
+            )
 
             # 保存历史
             self._history.append(messages[-1])
@@ -141,10 +176,12 @@ class VisionSubAgent:
             )
 
     async def continue_with_info(self, info: str) -> VisionVerdict:
-        """用额外信息继续判断——Vision Sub-Agent 追问后，Harness 获取信息并返回。"""
+        """用额外信息继续判断——Vision Sub-Agent 追问后，Harness 获取信息并返回。
+
+        Vision → LLM 方向：VisionVerdict.need_more_info → Harness 获取信息 → 此方法。
+        """
         self._call_count += 1
 
-        # 添加追问的回答作为用户消息
         self._history.append({
             "role": "user",
             "content": [{"type": "text", "text": f"补充信息：{info}"}],
@@ -152,12 +189,47 @@ class VisionSubAgent:
 
         messages = list(self._history)
         try:
-            # 追问后保持验证模式
             response = await _call_vision_api(self.config, messages, verify_mode=True)
             self._history.append({"role": "assistant", "content": response})
             return _parse_verdict(response, verify_mode=True)
         except Exception as e:
             logger.error("Vision API 继续判断失败: %s", e)
+            return VisionVerdict(
+                pass_=False,
+                reason=f"Vision API 调用失败: {e}",
+                adjustment="请重试",
+            )
+
+    async def continue_with_question(
+        self,
+        question: str,
+        scene_context: str = "",
+    ) -> VisionVerdict:
+        """LLM 主动追问同一 Session 内的截图——无新截图，复用对话历史。
+
+        LLM → Vision 方向（Issue 015 新增）：VisionSessionManager.ask() → 此方法。
+        Vision 可以引用历史截图和之前的分析结果（如"上次说的蓝色光"）。
+        """
+        self._call_count += 1
+
+        user_message = f"追问：{question}"
+        if scene_context:
+            user_message += f"\n\n{scene_context}"
+
+        self._history.append({
+            "role": "user",
+            "content": [{"type": "text", "text": user_message}],
+        })
+
+        messages = list(self._history)
+        try:
+            response = await _call_vision_api(
+                self.config, messages, verify_mode=False, question=question,
+            )
+            self._history.append({"role": "assistant", "content": response})
+            return _parse_verdict(response, verify_mode=False)
+        except Exception as e:
+            logger.error("Vision API 追问失败: %s", e)
             return VisionVerdict(
                 pass_=False,
                 reason=f"Vision API 调用失败: {e}",
@@ -182,13 +254,15 @@ async def _call_vision_api(
     config: Config,
     messages: list[dict],
     verify_mode: bool = True,
+    question: str = "",
 ) -> str:
     """调用 Anthropic Claude Vision API。
 
     Args:
         config: Harness 配置。
         messages: 消息历史。
-        verify_mode: True=验证模式（返回 JSON），False=描述模式（返回自然语言）。
+        verify_mode: True=验证模式（返回 JSON），False=描述/提问模式（返回自然语言）。
+    question: 针对性提问文本。有值时使用 VISION_SYSTEM_PROMPT_QUESTION。
 
     如果未安装 anthropic SDK 或无 API key，返回 mock 响应用于测试。
     """
@@ -216,7 +290,12 @@ async def _call_vision_api(
     )
 
     # 根据模式选择 system prompt
-    system = VISION_SYSTEM_PROMPT_VERIFY if verify_mode else VISION_SYSTEM_PROMPT_DESCRIBE
+    if verify_mode:
+        system = VISION_SYSTEM_PROMPT_VERIFY
+    elif question:
+        system = VISION_SYSTEM_PROMPT_QUESTION
+    else:
+        system = VISION_SYSTEM_PROMPT_DESCRIBE
     anthropic_messages = []
     for msg in messages:
         role = msg["role"]

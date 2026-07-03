@@ -175,10 +175,19 @@ def cmd_start(args: argparse.Namespace) -> int:
 
         # 007 视觉验证拦截器（无 session 依赖）
         vision_agent = VisionSubAgent(config)
+
+        # Issue 015: Vision Session Manager
+        from harness.verification.session import VisionSessionManager
+        _vision_session_mgr = VisionSessionManager(
+            config, world_state=_cache,
+            log_dir=config.log_dir,
+        )
+
         vision_interceptor = VisionInterceptor(
             vision_agent, _cache,
             get_active_skill=lambda: _active_skill_ref[0],
             get_pending_screenshot=lambda: _pending_screenshot_ref[0],
+            session_manager=_vision_session_mgr,
         )
 
         try:
@@ -247,7 +256,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             server = build_server(config, ue_client, interceptors,
                                   world_state=_cache, skill_ref=_active_skill_ref,
                                   snapshot_recorder=snapshot_recorder,
-                                  pending_screenshot_ref=_pending_screenshot_ref)
+                                  pending_screenshot_ref=_pending_screenshot_ref,
+                                  vision_session_manager=_vision_session_mgr)
 
             # 初始化 instructions：列出可用 Skill（含触发词，供 LLM 匹配用户意图）
             skill_registry = SkillRegistry()
