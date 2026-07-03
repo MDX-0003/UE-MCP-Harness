@@ -311,22 +311,24 @@ def _safe_filename(name: str) -> str:
 
 
 def _ensure_builtin_skill(skills_dir: Path) -> None:
-    """首次运行时，将 evening-lighting.yaml 复制到 skills_dir。"""
-    target = skills_dir / "evening-lighting.yaml"
-    if target.exists():
-        return
+    """首次运行时，将内置 Skill YAML 复制到 skills_dir。"""
+    builtin_names = ["evening-lighting", "scene-verification"]
+    for name in builtin_names:
+        target = skills_dir / f"{name}.yaml"
+        if target.exists():
+            continue
 
-    # 从 Harness 包内查找内置 Skill
-    candidates = [
-        Path(__file__).resolve().parent.parent.parent / "skills" / "evening-lighting.yaml",
-        Path.cwd() / "skills" / "evening-lighting.yaml",
-    ]
-    for src in candidates:
-        if src.is_file():
-            target.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-            logger.info("已复制内置 Skill: %s → %s", src, target)
-            return
-
-    # 如果找不到内置文件，创建占位
-    logger.debug("未找到内置 Skill 文件，创建空模板")
-    target.write_text(BUILTIN_SKILL_TEMPLATE.format(name="evening-lighting"), encoding="utf-8")
+        # 从 Harness 包内查找内置 Skill
+        candidates = [
+            Path(__file__).resolve().parent.parent.parent / "skills" / f"{name}.yaml",
+            Path.cwd() / "skills" / f"{name}.yaml",
+        ]
+        for src in candidates:
+            if src.is_file():
+                target.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+                logger.info("已复制内置 Skill: %s → %s", src, target)
+                break
+        else:
+            # 如果找不到内置文件，创建占位
+            logger.debug("未找到内置 Skill 文件 %s，创建空模板", name)
+            target.write_text(BUILTIN_SKILL_TEMPLATE.format(name=name), encoding="utf-8")

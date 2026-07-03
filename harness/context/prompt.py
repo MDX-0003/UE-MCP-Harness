@@ -36,8 +36,19 @@ class SystemContextProvider(ContextProvider):
         "尽量使用截图验证你的修改。\n"
     )
 
+    # 验证 SOP 简版（软引导，始终可见；完整版在 scene-verification Skill 激活后注入）
+    VERIFICATION_SOP_HINT = (
+        "\n💡 修改场景后，调 activate_skill(\"验证\") 进入标准视觉验证流程"
+        "（L2 读回 → vision_screenshot → vision_ask → 闭环）。"
+    )
+
     def render(self, state: WorldState | None, active_skill: dict | None) -> str:
-        return self.AGENT_IDENTITY + "\n" + _render_state_snapshot(state)
+        parts = [self.AGENT_IDENTITY]
+        # 仅在无活跃 Skill 且 State Cache 非空时注入（避免初次启动时噪音）
+        if active_skill is None and state is not None:
+            parts.append(self.VERIFICATION_SOP_HINT)
+        parts.append(_render_state_snapshot(state))
+        return "\n".join(parts)
 
 
 def _render_state_snapshot(state: WorldState | None) -> str:
@@ -82,6 +93,22 @@ def _render_state_snapshot(state: WorldState | None) -> str:
         lines.append(
             f"- ⚠ 以下工具集未受 State Cache 追踪，如需最新状态请手动查询：{dirty_list}"
         )
+
+    # 008 Hard Boundary：漂移检测警告（ADR 0008）
+    if state.drift_detected:
+        lines.append("")
+        lines.append("## ⚠ 世界状态漂移")
+        lines.append("关卡在当前会话外被修改过（指纹失配或外部脏包检测）。")
+        lines.append("- 请调 **get_context** 获取最新手指纹和漂移详情。")
+        lines.append("- 在继续修改前，使用 find_actors / get_actor_transform 重新观测场景。")
+        lines.append("- 不要依赖过往会话的记忆——当前世界可能已有差异。")
+        if state.last_fingerprint:
+            fp = state.last_fingerprint
+            lines.append(
+                f"- 基准指纹：actorCount={fp.get('actorCount')} "
+                f"hash={fp.get('actorNameHash')} "
+                f"guid={fp.get('packageGuid','?')[:8]}..."
+            )
 
     # 007 验证闭环：视觉验证反馈
     if state.last_vision_verdict:

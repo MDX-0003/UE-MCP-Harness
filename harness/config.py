@@ -47,6 +47,7 @@ class Config:
         "scene.SceneTools.",
         "actor.ActorTools.",
         "object.ObjectTools.",
+        "LevelPersistenceToolset.",   # 指纹/保存/脏包查询（ADR 0008）
     )
 
     # 工具排除列表 — allowlist 匹配后进一步剔除（逃生通道不受影响）。

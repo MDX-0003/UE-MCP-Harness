@@ -106,6 +106,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     from harness.verification.config import load_vision_env
     from harness.verification.vision_agent import VisionSubAgent
     from harness.verification.interceptor import VisionInterceptor
+    from harness.verification.drift_alert import DriftAlertInterceptor
     from harness.observability.snapshotter import SnapshotRecorder
     from harness.verification.capturer import init_shot_session, close_shot_session
 
@@ -200,6 +201,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 DebugPreCallInterceptor(),
                 tool_logger,
                 cache_interceptor,
+                DriftAlertInterceptor(_cache),   # 漂移时注入警告到 tool call 返回值
                 vision_interceptor,
                 snapshot_recorder,
             ]
