@@ -191,8 +191,9 @@ def build_server(
             name="take_screenshot",
             description=(
                 "Harness 截图工具（推荐）。通过 capturer 模块统一获取 UE 截图，"
-                "自动 resize 到 1024x768、isError 检测、base64 修复。"
-                "返回纯文本描述（不含 base64），视觉分析结果通过 get_context 查看。"
+                "自动 resize 到 1024x768、isError 检测、base64 修复，"
+                "并自动触发 Vision 视觉分析（通过 mimo-v2.5 模型）。"
+                "返回纯文本描述（截图尺寸 + Vision 分析结果），不含 base64。"
                 "支持三种模式：viewport（默认，仅视口画面）、editor（合成编辑器窗口）、"
                 "asset（单个资产缩略图）。"
             ),
@@ -384,7 +385,20 @@ def build_server(
                 except Exception as e:
                     logger.error("后拦截 %s 失败: %s", type(ic).__name__, e)
 
-            return CallToolResult(content=[TextContent(type="text", text=result_text)])
+            # 008 / 007: 将 Vision 分析结果追加到返回值，避免 LLM 漏看
+            vision_info = ""
+            if world_state is not None and world_state.last_vision_verdict:
+                v = world_state.last_vision_verdict
+                status = "✅ PASS" if v.get("pass") else "❌ FAIL"
+                reason = v.get("reason", "")
+                vision_info = f"\n\n[Vision 分析] {status}\n{reason}"
+                if v.get("adjustment"):
+                    vision_info += f"\n调整建议: {v['adjustment']}"
+                logger.debug("take_screenshot 返回值中携带 Vision 分析结果")
+
+            return CallToolResult(
+                content=[TextContent(type="text", text=result_text + vision_info)]
+            )
 
         # ---- UE 工具透传 ----
         t_start = time.monotonic()
@@ -425,14 +439,19 @@ def build_server(
             except Exception as e:
                 logger.error("后拦截 %s 失败: %s", type(ic).__name__, e)
 
-        # L3 刷新：load_level handler 标记了 _needs_refresh
+        # Hard Boundary: load_level handler 标记了 _needs_refresh
         if world_state is not None and world_state._needs_refresh:
-            from harness.state.refresher import full_refresh
+            from harness.state.hard_boundary import execute_hard_boundary
             try:
-                await full_refresh(ue_client, world_state)
-                logger.info("load_level 后 L3 刷新完成")
+                hb_result = await execute_hard_boundary(
+                    ue_client, world_state, reason="load_level",
+                    expected_fingerprint=world_state.last_fingerprint,
+                )
+                world_state.last_fingerprint = hb_result.fingerprint
+                world_state.drift_detected = hb_result.drift_detected
+                logger.info("load_level 后 Hard Boundary 完成")
             except Exception as e:
-                logger.warning("L3 刷新失败（非致命）: %s", e)
+                logger.warning("Hard Boundary 执行失败（非致命）: %s", e)
 
         if error:
             logger.error("工具调用失败: %s(%s) -> %s", name, arguments, error)

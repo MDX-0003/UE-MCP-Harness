@@ -99,15 +99,31 @@ def _parse_actor_list(result: str) -> list[str]:
 
 
 def _extract_level_path(result: str) -> str:
-    """从 get_current_level 结果中提取地图路径。"""
+    """从 get_current_level 结果中提取地图路径。
+
+    Python toolset 返回格式: content[0].text = '{"returnValue":"/Game/MyMap"}' （有 returnValue 包装）
+    或直接返回纯文本路径。
+    """
     import json
     try:
         parsed = json.loads(result) if isinstance(result, str) else result
+        text = ""
         if isinstance(parsed, dict):
             content = parsed.get("content", [])
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text":
-                    return item.get("text", "").strip().strip('"')
+                    text = item.get("text", "").strip()
+                    break
+
+        # 尝试解析 returnValue 包装
+        if text:
+            try:
+                wrapper = json.loads(text)
+                if isinstance(wrapper, dict) and "returnValue" in wrapper:
+                    return wrapper["returnValue"].strip().strip('"')
+            except json.JSONDecodeError:
+                pass
+            return text.strip().strip('"')
     except json.JSONDecodeError:
         pass
     return ""

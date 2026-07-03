@@ -1,5 +1,12 @@
 # 0004 — State Cache 采用 Write-Through 策略，非轮询刷新
 
+> **修订（2026-07-02，见 ADR 0008）：** 本 ADR 的机制保留，但信任语义被修订：
+> 1. L1 写穿透的产物从"事实"降级为"带时间戳的观测"——UE Editor 是唯一权威源，缓存注入上下文时必须标注观测时间与指纹校验结果；
+> 2. L2 读回验证从"可选"升级为正确性验证的主通道（Vision 只管审美判断）；
+> 3. Hard Boundary 触发条件新增第 5 种：关卡指纹失配（由 LevelPersistenceToolset 提供指纹原语）。
+>
+> 本 ADR 隐含的"所有世界改动经过 Harness"假设已被否定——Harness 外改动（用户手动操作编辑器等）必然存在，检测手段见 ADR 0008。
+
 **背景：** State Cache 需要维护 UE 编辑器世界状态的内存快照。两个极端方案：（1）每次 LLM 需要时全量 `find_actors(glob='*')`——对大型关卡太重；（2）定期轮询——不知道何时该轮询。
 
 **决策：** Harness 采用 Write-Through Cache（写穿透缓存）三层策略。因为 Harness 拦截所有 tool call，它天然知道每次修改了什么。

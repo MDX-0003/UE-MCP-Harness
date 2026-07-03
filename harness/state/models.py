@@ -55,7 +55,12 @@ class WorldState(BaseModel):
     pie_running: bool | None = None       # None = 未知（无直接数据源）
     last_full_refresh: datetime | None = None
     last_vision_verdict: dict | None = None  # 007 验证闭环：最近一次视觉验证结果
-    _needs_refresh: bool = False          # load_level 后标记，触发 L3 刷新
+
+    # Hard Boundary 指纹（ADR 0008）：上次 execute_hard_boundary() 获取的关卡指纹
+    last_fingerprint: dict | None = None
+    drift_detected: bool = False          # 上次 Hard Boundary 检测到漂移
+
+    _needs_refresh: bool = False          # load_level 后标记，由 Hard Boundary 消费后清除
 
 
 # 高频 write tool → handler 路由表（008 使用）

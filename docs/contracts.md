@@ -441,6 +441,7 @@ ContextProvider（系统文本）和工具过滤（`tools/list` 返回值）是 
 | 1 — ToolCallInterceptor | `harness/interceptor.py` | 003, 008, 011 | ✅ |
 | 2 — WorldState | `harness/state/models.py` | 004, 008 | ✅ |
 | 3 — ContextProvider | `harness/context/provider.py` | 004, 005 | ✅ |
+| 4 — LevelPersistenceToolset | UE 侧插件 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset/` | 008, 014 | ✅ |
 
 ## 并行开发分工
 
@@ -456,3 +457,126 @@ ContextProvider（系统文本）和工具过滤（`tools/list` 返回值）是 
 - `harness/server.py`：注册 `interceptors` 列表 + `providers` 列表
 - `harness/config.py`：新增 `DEFAULT_TOOLS_ALLOWLIST` 配置项（004 使用）
 - `harness/cli.py`：新增 `harness vision check` 子命令（006 使用）
+
+---
+
+## Contract 4: LevelPersistenceToolset — 关卡指纹与保存契约
+
+**涉及模块**：008（Hard Boundary 指纹比对）、014（闭环验收）
+
+**契约状态**：✅ 已锁定（UE 侧插件已实现，工具全限定名前缀 `LevelPersistenceToolset.LevelPersistenceToolset.`）
+
+### 工具清单
+
+| 工具 | 参数 | 返回值类型 | 用途 |
+|---|---|---|---|
+| `SaveCurrentLevel` | — | `FingerprintJSON` | 保存当前关卡 + 返回指纹 |
+| `SaveAsset` | `AssetPath: string` | `FingerprintJSON` | 保存指定资产 + 返回指纹 |
+| `SaveAll` | — | `SaveAllJSON` | 保存所有脏包 + 返回列表 |
+| `ListDirtyPackages` | — | `JSON array of strings` | 查询所有脏包路径 |
+| `GetLevelFingerprint` | `LevelPath: string`（传 `""`=当前关卡） | `FingerprintJSON`（含 `isLoaded: bool`） | 只读指纹，不保存 |
+
+### FingerprintJSON schema
+
+```json
+// SaveCurrentLevel / SaveAsset 返回（status="saved" 时）:
+{
+  "status": "saved | partial | error",
+  "packagePath": "/Game/Maps/MyLevel",
+  "packageGuid": "4CE30229-49C3-2AE4-B86C-82AF5695A4EC",
+  "filePath": "E:/Project/Content/Maps/MyLevel.umap",
+  "fileSizeBytes": 12984,
+  "lastModified": "2026-07-02T10:31:07.000Z",
+  "actorCount": 145,
+  "actorNameHash": "08c621d4",
+  "externalActorPackages": 0,
+  "externalActorsSaved": 0,
+  "externalActorsFailed": 0
+}
+
+// GetLevelFingerprint 返回（已加载时）:
+{
+  "packagePath": "/Game/Maps/MyLevel",
+  "packageGuid": "...",
+  "filePath": "...",
+  "fileSizeBytes": 12984,
+  "lastModified": "2026-07-02T10:30:34.000Z",
+  "isLoaded": true,
+  "actorCount": 145,
+  "actorNameHash": "08c621d4"
+}
+
+// GetLevelFingerprint 返回（未加载时）:
+{
+  "packagePath": "/Game/Does/Not/Exist",
+  "packageGuid": "",
+  "filePath": "...",
+  "fileSizeBytes": 0,
+  "lastModified": "",
+  "isLoaded": false,
+  "actorCount": null,
+  "actorNameHash": null
+}
+```
+
+### Harness 消费方式
+
+**1. Hard Boundary 指纹比对：**
+
+```python
+# harness/state/refresher.py — 伪代码
+async def check_fingerprint(ue_client, expected_fingerprint: dict | None) -> dict:
+    """调用 GetLevelFingerprint，比对并返回 (match, current) 元组。"""
+    result = await ue_client.call_tool(
+        "LevelPersistenceToolset.LevelPersistenceToolset.GetLevelFingerprint",
+        {"LevelPath": ""}
+    )
+    current = json.loads(result)  # FingerprintJSON
+
+    if expected_fingerprint is None:
+        return {"match": True, "current": current, "is_first_check": True}
+
+    # 比对三个关键字段
+    match = (
+        current.get("packageGuid") == expected_fingerprint.get("packageGuid") and
+        current.get("actorCount") == expected_fingerprint.get("actorCount") and
+        current.get("actorNameHash") == expected_fingerprint.get("actorNameHash")
+    )
+    return {"match": match, "current": current}
+```
+
+**2. Dirty-diff 漂移检测：**
+
+```python
+# 记录 Harness 自己引发的 dirty 包
+self._harness_dirty_packages: set[str]
+
+# Hard Boundary 时：
+current_dirty = set(await call_tool("ListDirtyPackages"))
+current_dirty_filtered = {p for p in current_dirty if not p.startswith("/Script/")}
+
+external_dirty = current_dirty_filtered - self._harness_dirty_packages
+if external_dirty:
+    # 发生了 Harness 外改动
+    inject_drift_warning(external_dirty)
+```
+
+**3. Toolset 发现（Harness 启动时）：**
+
+Harness 启动后应先 `load_toolset("LevelPersistenceToolset.LevelPersistenceToolset")` 确保工具可用，再执行业务调用。
+
+### 工具返回值解析规则
+
+ToolsetRegistry 将 `FString` 返回值包装为 `{"returnValue": "<the_json_string>"}`。Harness 解析时需：
+
+```python
+raw = json.loads(response_text)
+inner_json_str = raw.get("returnValue", response_text)
+data = json.loads(inner_json_str) if isinstance(inner_json_str, str) else inner_json_str
+```
+
+### 已知限制（见 ADR 0008）
+
+- `actorNameHash` 只探测 Actor 增/删/改名，不探测 transform/属性/component 变化
+- 属性级漂移依赖 dirty flag（未保存）+ mtime（已保存）间接捕获
+- 三信号组合（hash + dirty + mtime）覆盖大部分实际场景，但 component 细节变更可能漏检

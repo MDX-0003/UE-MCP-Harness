@@ -120,6 +120,11 @@ class McpClientSession:
         self._connected: bool = False
         self._on_reconnect: list[Callable[[], Awaitable[None]]] = []
 
+    @property
+    def ue_port(self) -> int:
+        """UE MCP Server 端口号（供截图窗口激活等辅助功能使用）。"""
+        return self._config.ue_port
+
     # ---- 连接生命周期 ----
 
     async def connect(self) -> None:
@@ -572,12 +577,14 @@ class McpClientSession:
             )
         return JsonRpcResponse(id=rid, result=data.get("result", {})), resp_headers
 
-    async def _read_sse_stream(self, request_id: int, response) -> str:
+    async def _read_sse_stream(self, request_id: int, response, *, log: bool = False) -> str:
         """增量读取 SSE 事件流，遇 result/error 立即返回。
 
         与 _rpc() 的阻塞式 response.content 不同，此方法使用 aiter_lines()
         逐行消费 SSE 流——收到最终事件后立即返回，不等待 HTTP 连接关闭。
         处理 progress 通知、多行 data、注释行。
+
+        log: 为 True 时才输出 logger.info 日志。默认 False，避免高频调用污染上下文。
         """
         import time as _time
         data_parts: list[str] = []
@@ -594,7 +601,7 @@ class McpClientSession:
         async for line in response.aiter_lines():
             line_count += 1
             t_elapsed = _time.monotonic() - t_start
-            if line_count == 1:
+            if line_count == 1 and log:
                 logger.info("[sse-stream] id=%d 首行到达, 耗时=%.1fs, 内容: %s",
                             request_id, t_elapsed, line[:120])
             elif line_count <= 3:
@@ -616,8 +623,9 @@ class McpClientSession:
                     if "result" in data:
                         result = data["result"]
                         t_total = _time.monotonic() - t_start
-                        logger.info("[sse-stream] id=%d 收到 result, 总耗时=%.1fs, 共 %d 行",
-                                    request_id, t_total, line_count)
+                        if log:
+                            logger.info("[sse-stream] id=%d 收到 result, 总耗时=%.1fs, 共 %d 行",
+                                        request_id, t_total, line_count)
                         return (
                             json.dumps(result, ensure_ascii=False)
                             if isinstance(result, dict)

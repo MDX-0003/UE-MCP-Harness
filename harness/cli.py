@@ -29,6 +29,57 @@ def _setup_logging(level: str = "INFO") -> None:
     )
 
 
+EXPECTED_LEVEL_TOOLS = [
+    "LevelPersistenceToolset.LevelPersistenceToolset.SaveCurrentLevel",
+    "LevelPersistenceToolset.LevelPersistenceToolset.SaveAsset",
+    "LevelPersistenceToolset.LevelPersistenceToolset.SaveAll",
+    "LevelPersistenceToolset.LevelPersistenceToolset.ListDirtyPackages",
+    "LevelPersistenceToolset.LevelPersistenceToolset.GetLevelFingerprint",
+]
+
+LEVEL_TOOLSET_FULL_NAME = "LevelPersistenceToolset.LevelPersistenceToolset"
+
+
+async def _verify_level_persistence_tools(ue_client) -> list[str]:
+    """验证 LevelPersistenceToolset 五工具可用。返回缺失的工具名列表。
+
+    Harness 启动时调用：load_toolset → list_tools 比对 → ListDirtyPackages smoke call。
+    缺失时只记录警告，不阻断启动——指纹功能降级运行。
+    """
+    logger = logging.getLogger("harness.cli")
+
+    # 1. 加载 toolset（UE MCP 默认 deferred 模式）
+    try:
+        await ue_client.call_tool("load_toolset", {
+            "toolset_name": LEVEL_TOOLSET_FULL_NAME,
+        })
+        logger.debug("load_toolset: %s", LEVEL_TOOLSET_FULL_NAME)
+    except Exception as e:
+        logger.debug("load_toolset 失败: %s", e)
+        return [f"load_toolset failed: {e}"]
+
+    # 2. 检查 tools/list
+    try:
+        tools = await ue_client.list_tools()
+    except Exception as e:
+        return [f"tools/list failed: {e}"]
+
+    tool_names = {t["name"] for t in tools}  # list_tools 返回 list[dict]
+    missing = [t for t in EXPECTED_LEVEL_TOOLS if t not in tool_names]
+
+    # 3. Smoke test —— 调一个只读工具确认调用链路通畅
+    if not missing:
+        try:
+            await ue_client.call_tool(
+                "LevelPersistenceToolset.LevelPersistenceToolset.ListDirtyPackages", {}
+            )
+        except Exception as e:
+            logger.debug("ListDirtyPackages smoke test failed: %s", e)
+            missing.append(f"ListDirtyPackages smoke test failed: {e}")
+
+    return missing
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     """启动 Harness MCP Server，连接 UE MCP Server。
 
@@ -50,7 +101,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     from harness.context.skill_registry import SkillRegistry
     from harness.state.interceptor import StateCacheInterceptor
     from harness.state.models import WorldState
-    from harness.state.refresher import full_refresh
+    from harness.state.hard_boundary import execute_hard_boundary
     from harness.transport import serve
     from harness.verification.config import load_vision_env
     from harness.verification.vision_agent import VisionSubAgent
@@ -101,7 +152,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         logger.info("截图 session 已随主 session 重建")
 
     async def _refresh_cache_on_reconnect() -> None:
-        await full_refresh(ue_client, _cache)
+        result = await execute_hard_boundary(
+            ue_client, _cache, reason="reconnect",
+            expected_fingerprint=_cache.last_fingerprint,
+        )
+        _cache.last_fingerprint = result.fingerprint
+        _cache.drift_detected = result.drift_detected
         logger.info("State Cache 已随重连刷新")
 
     ue_client.add_reconnect_hook(_rebuild_shot_session)
@@ -161,14 +217,31 @@ def cmd_start(args: argparse.Namespace) -> int:
             await init_shot_session(config)
             logger.info("✓ 截图专用 session 已就绪")
 
-            # 4. L3 全量刷新 State Cache（首次连接 → Hard Boundary）
-            try:
-                await full_refresh(ue_client, _cache)
+            # 4. Hard Boundary: 首次连接 → L3 刷新 + 指纹基线 + dirty-diff
+            hb_result = await execute_hard_boundary(
+                ue_client, _cache, reason="startup",
+            )
+            _cache.last_fingerprint = hb_result.fingerprint
+            _cache.drift_detected = hb_result.drift_detected
+            if hb_result.refreshed:
                 logger.info("✓ State Cache 已就绪")
-            except Exception as e:
-                logger.warning("L3 刷新失败（非致命）: %s", e)
+            else:
+                logger.warning("L3 刷新失败（非致命），State Cache 可能为空")
 
-            # 4. 构建并启动 MCP Server
+            # 5. 验证 LevelPersistenceToolset 工具可用性
+            missing_tools = await _verify_level_persistence_tools(ue_client)
+            if missing_tools:
+                logger.warning(
+                    "LevelPersistenceToolset 部分工具不可用: %s",
+                    ", ".join(missing_tools),
+                )
+                logger.warning(
+                    "指纹校验和 Hard Boundary 漂移检测将降级运行。"
+                    "请确认 LevelPersistenceToolset 插件已编译并启用于 UE 项目。"
+                )
+            else:
+                logger.info("✓ LevelPersistenceToolset 5 工具全部就绪")
+
             server = build_server(config, ue_client, interceptors,
                                   world_state=_cache, skill_ref=_active_skill_ref,
                                   snapshot_recorder=snapshot_recorder,

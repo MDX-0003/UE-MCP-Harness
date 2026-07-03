@@ -128,6 +128,10 @@ async def capture(
     b_show_ui = not hide_ui
 
     async with _shot_lock:
+        # 截图前激活 UE 窗口，确保 DWM 正常合成、viewport 渲染帧
+        if _shot_client is not None:
+            _activate_ue_window(_shot_client.ue_port)
+
         if mode == "editor":
             try:
                 result = await _shot_client.call_tool(
@@ -170,7 +174,7 @@ def capture_from_file(path: Path, max_width: int = 1024, max_height: int = 768) 
     data = path.read_bytes()
     b64 = base64.b64encode(data).decode("ascii")
 
-    # 获取尺寸（不依赖 PIL）
+    # 获取尺寸（优先 PIL，fallback PNG header）
     try:
         from PIL import Image
         img = Image.open(io.BytesIO(data))
@@ -183,8 +187,96 @@ def capture_from_file(path: Path, max_width: int = 1024, max_height: int = 768) 
             w, h = img.size
         return Screenshot(data_b64=b64, width=w, height=h)
     except ImportError:
-        logger.debug("PIL 未安装，跳过 resize")
+        logger.debug("PIL 未安装，尝试 PNG header 解析尺寸")
+        dims = _parse_png_dimensions(data)
+        if dims:
+            return Screenshot(data_b64=b64, width=dims[0], height=dims[1])
         return Screenshot(data_b64=b64)
+    except Exception as e:
+        logger.warning("PIL resize 失败: %s，尝试 PNG header fallback", e)
+        dims = _parse_png_dimensions(data)
+        if dims:
+            return Screenshot(data_b64=b64, width=dims[0], height=dims[1])
+        return Screenshot(data_b64=b64)
+
+
+# ---- 窗口激活辅助（解决后台窗口不渲染帧导致截图超时） -------------------
+
+
+def _activate_ue_window(port: int) -> bool:
+    """在截图前激活 UE 编辑器窗口，确保 viewport 被 DWM 正常合成。
+
+    根因：UE viewport 截图通过 FScreenshotRequest 设置 flag，依赖下一帧渲染。
+    但当 UE 窗口在后台时，Windows DWM 可能节流/跳过 GPU 合成，导致
+    FViewport::Draw() 不被调用、ProcessScreenShots() 永远检查不到 flag。
+
+    此函数查找 UE 进程的主窗口并尝试恢复+置顶。
+    仅在 Windows 平台有效，失败静默返回 False 不阻断截图流程。
+    """
+    if sys.platform != "win32":
+        return False
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    # 找到监听 UE 端口的进程 PID
+    pids = _list_listening_pids(port)
+    if not pids:
+        logger.debug("窗口激活跳过: 未找到监听端口 %d 的进程", port)
+        return False
+    target_pid = pids[0]
+
+    # 枚举顶层窗口，找到匹配 PID 的可见窗口
+    found_windows = []
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _enum_callback(hwnd, lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == lparam:
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                found_windows.append((hwnd, buf.value))
+        return True
+
+    enum_proc = WNDENUMPROC(_enum_callback)
+    user32.EnumWindows(enum_proc, wintypes.LPARAM(target_pid))
+
+    if not found_windows:
+        logger.debug("窗口激活跳过: PID=%d 无可见窗口", target_pid)
+        return False
+
+    # 优先选择标题最大的窗口（UE 编辑器主窗口）
+    found_windows.sort(key=lambda x: len(x[1]), reverse=True)
+    hwnd, title = found_windows[0]
+    logger.debug("窗口激活: HWND=%s 标题=%s PID=%d", hwnd, title, target_pid)
+
+    # 如果窗口已最小化，先恢复
+    SW_RESTORE = 9
+    SW_SHOW = 5
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        logger.debug("窗口激活: 从最小化恢复")
+
+    # 解除前台窗口锁定（ASFW_ANY = 0xFFFFFFFF），允许本进程调 SetForegroundWindow
+    user32.AllowSetForegroundWindow(-1)
+    # 置顶 + 设为前台窗口
+    HWND_TOP = 0
+    SWP_NOSIZE = 0x0001
+    SWP_NOMOVE = 0x0002
+    user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE)
+    user32.SetForegroundWindow(hwnd)
+    user32.BringWindowToTop(hwnd)
+    # 给 DWM 一点时间恢复合成（SetForegroundWindow 有异步限制）
+    time.sleep(0.15)
+    return True
 
 
 # ---- 文件 fallback 辅助函数 ------------------------------------------------
@@ -322,6 +414,10 @@ async def _capture_asset_image_with_file_fallback(
     tool_name = "ToolsetRegistry.EditorAppToolset.CaptureAssetImage"
     args = {"AssetPath": asset_path, "bShowUI": b_show_ui}
     start_wall = time.time()
+
+    # 截图前激活 UE 窗口，确保 DWM 正常合成、viewport 渲染帧
+    if _shot_client is not None:
+        _activate_ue_window(_shot_client.ue_port)
 
     try:
         result = await _shot_client.call_tool(tool_name, args)
@@ -607,11 +703,47 @@ def parse_screenshot(raw: str, max_width: int = 1024, max_height: int = 768) -> 
             w, h = img.size
         return Screenshot(data_b64=b64_data, width=w, height=h)
     except ImportError:
-        logger.debug("PIL 未安装，返回原始截图尺寸未知")
+        logger.debug("PIL 未安装，尝试 PNG header 解析尺寸")
+        try:
+            data = base64.b64decode(b64_data)
+            dims = _parse_png_dimensions(data)
+            if dims:
+                return Screenshot(data_b64=b64_data, width=dims[0], height=dims[1])
+        except Exception:
+            pass
         return Screenshot(data_b64=b64_data)
     except Exception as e:
-        logger.warning("Resize 失败: %s，base64 前 80 字符: %s", e, b64_data[:80])
+        logger.warning("Resize 失败: %s，尝试 PNG header fallback", e)
+        try:
+            data = base64.b64decode(b64_data)
+            dims = _parse_png_dimensions(data)
+            if dims:
+                return Screenshot(data_b64=b64_data, width=dims[0], height=dims[1])
+        except Exception:
+            pass
         return Screenshot(data_b64=b64_data)
+
+
+def _parse_png_dimensions(data: bytes) -> tuple[int, int] | None:
+    """从 PNG 原始字节中解析宽度和高度（不依赖 PIL）。
+
+    PNG 文件格式：
+      Bytes 0-7:   89 50 4E 47 0D 0A 1A 0A (signature)
+      Bytes 8-11:  IHDR chunk length (big-endian, always 13)
+      Bytes 12-15: "IHDR"
+      Bytes 16-19: width  (big-endian uint32)
+      Bytes 20-23: height (big-endian uint32)
+
+    返回 (width, height) 或 None（如果不是 PNG）。
+    """
+    if len(data) < 24:
+        return None
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    import struct
+    w = struct.unpack(">I", data[16:20])[0]
+    h = struct.unpack(">I", data[20:24])[0]
+    return (w, h)
 
 
 def _looks_like_base64(s: str) -> bool:

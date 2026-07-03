@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../UE_5.8/Engine/Plugins/Experimental/ModelContextProtocol"
+		},
+		{
+			"path": "../../../UE_Project_58/MCP/Plugins"
 		}
 	],
 	"settings": {}

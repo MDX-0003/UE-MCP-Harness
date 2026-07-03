@@ -1,4 +1,6 @@
-# Harness MVP 闭环开发计划 — 2026-06-16（更新于 2026-06-30）
+# Harness MVP 闭环开发计划 — 2026-06-16（更新于 2026-07-02）
+
+> **2026-07-02 方向变更**：项目定位定为求职/作品集叙事；信任模型倒转（ADR 0008）：UE 是唯一权威，WorldState 降级为带指纹校验的观测记录。本计划的 Phase 4（009 任务记忆）作废——重定义为轨迹记忆并入 ADR 0008。当前里程碑改为 **Issue 014 闭环验收场景**（指纹 Hard Boundary 接入 + L2 读回验证 + demo），见 `docs/issues/014-e2e-acceptance-scenario.md`。
 
 ## 当前状态总览
 
@@ -12,10 +14,11 @@
 | 006 | Vision Pipeline | ✅ | 24 tests | ✅ | capturer 三种 mode + file fallback + auto-discovery |
 | 007 | 验证闭环 | ✅ | 25 tests | ✅ | VisionInterceptor → WorldState → get_context |
 | 008 | State Cache | ✅ | 18 tests | ✅ | L1 write-through + L3 refresh |
-| 009 | 任务记忆 | ❌ | — | ❌ | 依赖 005+008（002 已就绪） |
+| 009 | 任务记忆 | ⬜ | — | — | **作废**，重定义为轨迹记忆并入 ADR 0008 |
 | 010 | 错误恢复 | ⬜ | — | — | **跳过** |
 | 011 | 安全护栏 | ❌ | — | ❌ | 待开发 |
-| 012 | 连接健康检测 | ❌ | — | ❌ | 待开发；传输层 ping + 自动重连 |
+| 012 | 连接健康检测 | ✅ | 23 tests | ✅ | 传输层 ping + 自动重连 |
+| 014 | 闭环验收场景 | ❌ | — | ❌ | **当前里程碑**，见 issues/014 |
 
 **全量测试**：233 unit tests passed + L3 e2e 7/7 passed
 
@@ -138,7 +141,9 @@ Phase 2 完成后，重新在 VS Code 中测试完整链路：
 
 ---
 
-### Phase 4: 009 任务记忆（1-2 天）— 优先级 P1
+### Phase 4: 009 任务记忆（1-2 天）— ~~优先级 P1~~ **[作废 2026-07-02]**
+
+> 依 ADR 0008 重定义为轨迹记忆（TaskMemory 附带关卡指纹，恢复时校验），实现推迟到 Issue 014 验收场景跑通之后另立 Issue。以下原案仅作历史记录。
 
 **目标**：长任务（10+ 步）的 context 不爆炸。
 

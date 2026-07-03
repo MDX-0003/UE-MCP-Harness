@@ -5,3 +5,4 @@
 - [Config and Paths](005-config-and-paths.md) — log_dir 默认值、session_id 约定、.env
 - [Dev Status 2026-06-30](006-dev-status.md) — 当前进度 223 tests、截图 fallback + Vision 闭环完成、待做 009/011
 - [No Absolute Paths in Docs](007-no-absolute-paths-in-docs.md) — 文档禁用绝对路径，多设备开发用相对路径 + `{UE_PROJECT_ROOT}` 占位符
+- [Level Persistence Toolset](level-persistence-toolset.md) — UE 侧插件：关卡保存/指纹/脏包查询五工具，MCP deferred 模式 load_toolset 后可用
