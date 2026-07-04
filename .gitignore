@@ -51,7 +51,7 @@ Content/*.pt
 __pycache__/
 
 # Harness 本地数据（日志、快照、Skill 缓存）
-
+*.code-workspace
 .ue-harness/
 
 
