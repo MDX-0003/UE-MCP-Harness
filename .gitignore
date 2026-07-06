@@ -52,10 +52,14 @@ __pycache__/
 
 # uv
 .venv/
-
+ue_agent_harness.egg-info/
 # Harness 本地数据（日志、快照、Skill 缓存）
 *.code-workspace
 .ue-harness/
+
+# 敏感配置（含 API Key，不提交）
+.env
+.vision.env
 
 
 

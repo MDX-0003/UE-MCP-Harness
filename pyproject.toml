@@ -18,17 +18,10 @@ dependencies = [
     "anthropic>=0.30.0",
     "uvicorn>=0.30.0",
     "starlette>=0.38.0",
+    "pillow>=10.0",
 ]
 
 [dependency-groups]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-mock>=3.12",
-    "pytest-httpx>=0.30",
-]
-
-[project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

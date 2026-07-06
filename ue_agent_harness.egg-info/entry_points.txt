@@ -1,3 +1,0 @@
-[console_scripts]
-branch-mark = branch_mark.score:main
-harness = harness.cli:main
