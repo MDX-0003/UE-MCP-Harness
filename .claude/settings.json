@@ -6,7 +6,20 @@
       "Bash(git push *)",
       "Bash(git pull *)",
       "Bash(uv run *)",
-      "Bash(.venv/Scripts/python.exe -m pytest tests/test_state.py tests/test_session.py -v)"
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_state.py tests/test_session.py -v)",
+      "mcp__gortex__*",
+      "Bash(gortex list *)",
+      "Bash(gortex status *)",
+      "Bash(gortex --help)",
+      "Bash(gortex call *)",
+      "Bash(gortex untrack *)",
+      "Bash(gortex track *)",
+      "PowerShell($pwd.Path)",
+      "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\\\\class-name-persistence.md\" -Confirm:$false)",
+      "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\" -Confirm:$false)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Administrator\\.claude\\memory"
     ]
   }
 }

@@ -1,0 +1,29 @@
+<!-- gortex:communities:start -->
+<!-- gortex:skills:start -->
+## Community Skills
+
+| Area | Description | Skill |
+|------|-------------|-------|
+| 2 Dirs Post Call | 105 symbols | `/gortex-2-dirs-post-call` |
+| 4 Dirs Harness State Models Worldstate | 93 symbols | `/gortex-4-dirs-harness-state-models-worldstate` |
+| 3 Dirs Skillregistry | 83 symbols | `/gortex-3-dirs-skillregistry` |
+| 4 Dirs Harness Config Config | 71 symbols | `/gortex-4-dirs-harness-config-config` |
+| 2 Dirs Harness State Normalize Normali | 71 symbols | `/gortex-2-dirs-harness-state-normalize-normali` |
+| 3 Dirs Build Server | 70 symbols | `/gortex-3-dirs-build-server` |
+| 2 Dirs Post Call External Call Dep Harness Observability Snapshotter | 56 symbols | `/gortex-2-dirs-post-call-external-call-dep-harness-observability-snapshotter` |
+| 3 Dirs Rpc | 55 symbols | `/gortex-3-dirs-rpc` |
+| 2 Dirs Check | 53 symbols | `/gortex-2-dirs-check` |
+| 3 Dirs Now | 41 symbols | `/gortex-3-dirs-now` |
+| 2 Dirs Parse Screenshot | 34 symbols | `/gortex-2-dirs-parse-screenshot` |
+| 4 Dirs Loads | 34 symbols | `/gortex-4-dirs-loads` |
+| 4 Dirs Stop | 33 symbols | `/gortex-4-dirs-stop` |
+| 1 Dirs Harness Verification Capturer C | 31 symbols | `/gortex-1-dirs-harness-verification-capturer-c` |
+| 2 Dirs Capture | 31 symbols | `/gortex-2-dirs-capture` |
+| Tests 2 Dirs | 31 symbols | `/gortex-tests-2-dirs` |
+| 3 Dirs Cmd Start | 28 symbols | `/gortex-3-dirs-cmd-start` |
+| 2 Dirs Main | 25 symbols | `/gortex-2-dirs-main` |
+| Harness Observability 1 Dirs | 24 symbols | `/gortex-harness-observability-1-dirs` |
+| 2 Dirs Pre Call | 24 symbols | `/gortex-2-dirs-pre-call` |
+<!-- gortex:skills:end -->
+
+<!-- gortex:communities:end -->
