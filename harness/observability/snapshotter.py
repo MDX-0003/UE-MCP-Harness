@@ -23,6 +23,9 @@ from typing import Any, Callable
 
 from harness import __version__
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
+
+# Issue 015: 最近一次保存的截图文件路径，供 ToolCallLogger 读取
+_last_saved_screenshot_path: str | None = None
 from harness.state.models import WorldState
 from harness.verification.capturer import parse_screenshot, Screenshot
 from harness.verification.interceptor import _is_screenshot_tool
@@ -129,8 +132,8 @@ class SnapshotRecorder(ToolCallInterceptor):
         return d
 
     def _handle_screenshot(self, event: ToolCallCompleted) -> None:
-        # —— 路径 A: Harness take_screenshot ——
-        if event.name == "take_screenshot":
+        # —— 路径 A: Harness vision_screenshot ——
+        if event.name == "vision_screenshot":
             screenshot = self._get_pending_screenshot()
             if screenshot is None:
                 return
@@ -165,6 +168,9 @@ class SnapshotRecorder(ToolCallInterceptor):
                 v_path.write_text(
                     json.dumps(verdict, ensure_ascii=False, indent=2), encoding="utf-8")
             self._vision_call_count += 1
+            # Issue 015: 暴露给 ToolCallLogger 的截图路径回调
+            global _last_saved_screenshot_path
+            _last_saved_screenshot_path = str(png_path)
             logger.info("Screenshot snapshot 已保存: %s", png_path)
         except Exception as e:
             logger.warning("Screenshot 快照写入失败: %s", e)

@@ -51,10 +51,10 @@ class Config:
     )
 
     # 工具排除列表 — allowlist 匹配后进一步剔除（逃生通道不受影响）。
-    # UE 原生截图工具由 Harness take_screenshot 替代，LLM 无需直接看到。
-    # 临时放开 CaptureAssetImage 用于透传测试
+    # UE 原生截图工具由 Harness vision_screenshot 替代。
     default_tools_denylist: tuple[str, ...] = (
         "CaptureEditorImage",
+        "CaptureAssetImage",
     )
 
     # 视觉调试：True 时打印截图/vision 异常的完整 traceback

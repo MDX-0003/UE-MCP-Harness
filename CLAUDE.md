@@ -45,24 +45,24 @@ LLM (Claude Code) ←→ Harness MCP Server (:9000) ←→ UE MCP Server (:8000)
 ## 命令
 
 ```bash
-# 安装
-pip install -e ".[dev]"
+# 安装（使用 uv）
+uv sync
 
 # 启动 Harness
-harness start --ue-port 8000 --listen-port 9000
+uv run harness start --ue-port 8000 --listen-port 9000
 
 # 运行全部测试
-pytest tests/ -v
+uv run pytest tests/ -v
 
 # 运行单个模块测试
-pytest tests/test_verification.py -v
+uv run pytest tests/test_verification.py -v
 
 # L3 端到端测试（需要 UE 运行中）
-pytest tests/test_l3_e2e.py -v
+uv run pytest tests/test_l3_e2e.py -v
 
 # 可观测性
-harness stats
-harness replay <session_id>
+uv run harness stats
+uv run harness replay <session_id>
 ```
 
 ## 技术栈与约定

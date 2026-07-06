@@ -464,13 +464,13 @@ class TestVisionInterceptorImageExtraction:
             assert mock_check.call_args.args[0]  # 非空 base64
 
 
-class TestVisionInterceptorTakeScreenshot:
-    """Harness take_screenshot 工具 — 通过 get_pending_screenshot 回调注入 Screenshot。"""
+class TestVisionInterceptorVisionScreenshot:
+    """Harness vision_screenshot 工具 — 通过 get_pending_screenshot 回调注入 Screenshot。"""
 
-    async def test_take_screenshot_triggers_vision(
+    async def test_vision_screenshot_triggers_vision(
         self, mock_vision_agent, world_state, passing_verdict
     ) -> None:
-        """take_screenshot 工具 → VisionInterceptor 通过回调获取 Screenshot → 调 Vision。"""
+        """vision_screenshot 工具 → VisionInterceptor 通过回调获取 Screenshot → 调 Vision。"""
         with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
             mock_check.return_value = passing_verdict
 
@@ -480,7 +480,7 @@ class TestVisionInterceptorTakeScreenshot:
                 get_pending_screenshot=lambda: screenshot,
             )
             event = ToolCallCompleted(
-                name="take_screenshot",
+                name="vision_screenshot",
                 args={},
                 raw_result={"content": [{"type": "text", "text": "Screenshot 已获取: 1x1 image/png"}]},
                 parsed_text="Screenshot 已获取: 1x1 image/png",
@@ -492,7 +492,7 @@ class TestVisionInterceptorTakeScreenshot:
             mock_check.assert_called_once()
             assert mock_check.call_args.args[0]  # 非空 base64
 
-    async def test_take_screenshot_null_callback_skips(
+    async def test_vision_screenshot_null_callback_skips(
         self, mock_vision_agent, world_state
     ) -> None:
         """get_pending_screenshot 返回 None → 跳过 Vision 分析。"""
@@ -502,7 +502,7 @@ class TestVisionInterceptorTakeScreenshot:
                 get_pending_screenshot=lambda: None,
             )
             event = ToolCallCompleted(
-                name="take_screenshot",
+                name="vision_screenshot",
                 args={},
                 raw_result={"content": [{"type": "text", "text": "截图失败: ..."}]},
                 parsed_text="截图失败: ...",
@@ -513,10 +513,10 @@ class TestVisionInterceptorTakeScreenshot:
 
             mock_check.assert_not_called()
 
-    async def test_take_screenshot_with_skill_expected(
+    async def test_vision_screenshot_with_skill_expected(
         self, mock_vision_agent, world_state, passing_verdict
     ) -> None:
-        """take_screenshot + 活跃 Skill 的 verification.expected → 传给 Vision。"""
+        """vision_screenshot + 活跃 Skill 的 verification.expected → 传给 Vision。"""
         active_skill = {
             "name": "evening-lighting",
             "verification": {
@@ -535,7 +535,7 @@ class TestVisionInterceptorTakeScreenshot:
                 get_pending_screenshot=lambda: screenshot,
             )
             event = ToolCallCompleted(
-                name="take_screenshot", args={},
+                name="vision_screenshot", args={},
                 raw_result={}, parsed_text="...", error=None, duration_ms=200.0,
             )
             await interceptor.post_call(event)
@@ -545,10 +545,10 @@ class TestVisionInterceptorTakeScreenshot:
             assert call_kwargs["expected"] == "黄昏光照"
             assert call_kwargs["tolerance"] == 0.85
 
-    async def test_take_screenshot_error_event_skips(
+    async def test_vision_screenshot_error_event_skips(
         self, mock_vision_agent, world_state
     ) -> None:
-        """take_screenshot 出错时（error 非 None）→ 不触发 Vision。"""
+        """vision_screenshot 出错时（error 非 None）→ 不触发 Vision。"""
         with patch.object(mock_vision_agent, "check", new_callable=AsyncMock) as mock_check:
             screenshot = Screenshot(data_b64=_TINY_PNG_B64, width=1, height=1)
             interceptor = VisionInterceptor(
@@ -556,7 +556,7 @@ class TestVisionInterceptorTakeScreenshot:
                 get_pending_screenshot=lambda: screenshot,
             )
             event = ToolCallCompleted(
-                name="take_screenshot", args={},
+                name="vision_screenshot", args={},
                 raw_result=None, parsed_text=None,
                 error=Exception("UE 连接超时"), duration_ms=5000.0,
             )

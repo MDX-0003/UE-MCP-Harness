@@ -81,8 +81,8 @@ def _render_state_snapshot(state: WorldState | None) -> str:
     lines.append(f"- 场景 Actor 数：{actor_count}")
 
     if state.dirty_actors:
-        dirty_list = ", ".join(sorted(state.dirty_actors)[:5])
-        if len(state.dirty_actors) > 5:
+        dirty_list = ", ".join(sorted(state.dirty_actors)[:10])
+        if len(state.dirty_actors) > 10:
             dirty_list += f" ...等 {len(state.dirty_actors)} 个"
         lines.append(f"- ⚠ 以下 Actor 缓存可能过时：{dirty_list}")
 

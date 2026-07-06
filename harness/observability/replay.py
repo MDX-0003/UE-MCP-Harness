@@ -40,17 +40,38 @@ def cmd_replay(log_file: Path, ue_port: int = 8000) -> int:
         print(f"日志文件为空: {log_file}")
         return 0
 
-    config = Config(ue_port=ue_port)
+    # 加载完整配置（环境变量），再覆盖 ue_port
+    try:
+        config = Config.from_env()
+        config.ue_port = ue_port  # type: ignore[assignment]
+    except Exception:
+        config = Config(ue_port=ue_port)
+
+    # Harness 原生工具——不在 UE 侧，无法回放，跳过
+    _HARNESS_TOOLS = frozenset({
+        "activate_skill", "deactivate_skill", "get_context", "save_skill",
+        "vision_screenshot", "vision_ask", "vision_tell", "vision_reset", "vision_status",
+    })
 
     async def run() -> int:
         client = McpClientSession(config)
         try:
             await client.connect()
             logger.info("已连接 UE MCP Server，开始回放 %d 个步骤...", len(entries))
+            skipped = 0
 
             for i, entry in enumerate(entries, start=1):
-                tool_name = entry.get("tool_name", "")
-                tool_input = entry.get("tool_input", {})
+                # 兼容新旧两种 JSONL 格式
+                tool_name = entry.get("tool_name") or entry.get("tool", "")
+                tool_input = entry.get("tool_input") or entry.get("input", {})
+
+                # 跳过 Harness 原生工具
+                short = tool_name.split(".")[-1] if "." in tool_name else tool_name
+                if short in _HARNESS_TOOLS:
+                    logger.debug("[%d/%d] 跳过 Harness 工具: %s", i, len(entries), tool_name)
+                    skipped += 1
+                    continue
+
                 logger.info("[%d/%d] 回放: %s", i, len(entries), tool_name)
 
                 try:
@@ -65,8 +86,10 @@ def cmd_replay(log_file: Path, ue_port: int = 8000) -> int:
                     print(f"  错误: {e}")
                     return 1
 
-            logger.info("回放完成，%d 个步骤全部成功。", len(entries))
-            print(f"回放完成: {len(entries)} 个步骤全部成功")
+            logger.info("回放完成，%d 个步骤全部成功（跳过 %d 个 Harness 工具）。",
+                        len(entries) - skipped, skipped)
+            print(f"回放完成: {len(entries) - skipped} 个步骤成功"
+                  + (f"（跳过 {skipped} 个 Harness 工具）" if skipped else ""))
             return 0
 
         except Exception as e:

@@ -105,7 +105,6 @@ class _StreamableHttpMiddleware:
 
 def create_app(
     server: Server,
-    instructions: str = "",
     enable_sse: bool = True,
     enable_streamable_http: bool = True,
 ) -> Starlette:
@@ -124,8 +123,6 @@ def create_app(
         配置好的 Starlette 应用。
     """
     _init_opts = server.create_initialization_options()
-    if instructions:
-        _init_opts.instructions = instructions
 
     middlewares: list[Middleware] = [
         Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
@@ -162,7 +159,6 @@ async def serve(
     server: Server,
     host: str = "127.0.0.1",
     port: int = 9000,
-    instructions: str = "",
     enable_sse: bool = True,
     enable_streamable_http: bool = True,
 ) -> None:
@@ -185,7 +181,6 @@ async def serve(
     """
     app = create_app(
         server,
-        instructions,
         enable_sse=enable_sse,
         enable_streamable_http=enable_streamable_http,
     )
@@ -202,8 +197,6 @@ async def serve(
 
     # 初始化选项
     _init_opts = server.create_initialization_options()
-    if instructions:
-        _init_opts.instructions = instructions
 
     # 如果启用了 Streamable HTTP，需要在 connect() 上下文中运行 server
     if sh_transport is not None and enable_streamable_http:
@@ -251,3 +244,4 @@ def _log_startup(host: str, port: int, sse: bool, sh: bool) -> None:
     if sse:
         endpoints.append(f"http://{host}:{port}/sse (SSE)")
     logger.info("Harness MCP Server 启动中，端点: %s", ", ".join(endpoints))
+    logger.info("接下来可以：1.Agent端重连一次MCP Server 2.开始与外部Agent对话")

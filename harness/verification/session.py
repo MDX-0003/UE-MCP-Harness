@@ -396,7 +396,7 @@ def build_full_prompt_context(
         last_v = last.get("verdict", {})
         if last_v:
             passed = "✅" if last_v.get("pass") else "❌"
-            reason = last_v.get("reason", "")[:200]
+            reason = last_v.get("reason", "")[:500]
             blocks.append((3, f"上次验证结果：{passed} {reason}"))
 
     if not blocks:
@@ -484,6 +484,10 @@ class VisionSessionManager:
         self._log_dir = log_dir
         self._active: VisionSession | None = None
         self._archive: list[VisionSession] = []
+
+    def set_log_dir(self, log_dir: Path) -> None:
+        """动态更新日志目录（Harness session 连接后调用）。"""
+        self._log_dir = log_dir
 
     # ---- 会话生命周期 ----
 
@@ -607,12 +611,12 @@ class VisionSessionManager:
         # 记录
         verdict_dict = {
             "pass": verdict.pass_,
-            "reason": verdict.reason[:300],
+            "reason": verdict.reason[:1000],
             "adjustment": verdict.adjustment,
-            "question": question[:200] if question else "",
+            "question": question[:500] if question else "",
         }
         session.question_log.append({
-            "question": question[:200] if question else "(描述模式)",
+            "question": question[:500] if question else "(描述模式)",
             "verdict": verdict_dict,
             "at": datetime.now(timezone.utc).isoformat(),
         })
@@ -648,12 +652,12 @@ class VisionSessionManager:
 
         verdict_dict = {
             "pass": verdict.pass_,
-            "reason": verdict.reason[:300],
+            "reason": verdict.reason[:1000],
             "adjustment": verdict.adjustment,
-            "question": question[:200],
+            "question": question[:500],
         }
         session.question_log.append({
-            "question": question[:200],
+            "question": question[:500],
             "verdict": verdict_dict,
             "at": datetime.now(timezone.utc).isoformat(),
         })

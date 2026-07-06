@@ -1,0 +1,33 @@
+# 分支标记评估：观察场景并验证关键属性
+#
+# 目的：评估 LLM 在被要求 "观察并确认" 时，
+# 是否能用针对性提问取代泛泛描述。
+
+name: describe_and_check
+description: "观察场景并验证关键属性"
+
+scene_requirement: |
+  场景中应有明确区分度的物体（如不同颜色的立方体、不同位置的灯光）。
+  至少包含 3 个不同类型/颜色的 Actor。
+
+instruction: |
+  请观察当前场景并回答以下问题：场景中有哪些主要物体？它们的相对位置关系是什么？
+  请使用可用的工具来确认你的观察，确保你的回答是基于可见证据而非猜测。
+  完成后告诉我你确认了什么。
+
+metrics:
+  - id: targeted_question
+    label: "针对性提问"
+    description: "截图时是否携带了具体问题（如 '有哪些类型的光源？'）而非 '描述场景'"
+  - id: question_specificity
+    label: "问题具体度"
+    description: "提问是否包含 Actor 名或具体属性"
+  - id: follow_up_used
+    label: "追问使用"
+    description: "是否在首次截图后用 vision_ask 深入分析"
+  - id: session_closed
+    label: "Session 关闭"
+    description: "是否在完成后调用了 vision_reset"
+  - id: total_tool_calls
+    label: "总 tool call 数"
+    description: "完成任务的总 tool call 数"

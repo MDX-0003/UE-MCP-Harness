@@ -1,4 +1,4 @@
-"""验证 Harness take_screenshot 三种截图模式 → Vision 管线端到端。
+"""验证 Harness vision_screenshot 三种截图模式 → Vision 管线端到端。
 
 串行测试 viewport / editor / asset 三种 mode，每种模式验证：
   1. 调用成功（isError=False）
@@ -33,15 +33,15 @@ async def main() -> int:
             print("1. 确认 tools/list...")
             tools_result = await session.list_tools()
             tool_names = [t.name for t in tools_result.tools]
-            if "take_screenshot" not in tool_names:
-                print("   ❌ take_screenshot 不可用，请重启 Harness")
+            if "vision_screenshot" not in tool_names:
+                print("   ❌ vision_screenshot 不可用，请重启 Harness")
                 return 1
             # 打印 schema 确认 mode 参数
             for t in tools_result.tools:
-                if t.name == "take_screenshot":
+                if t.name == "vision_screenshot":
                     props = t.inputSchema.get("properties", {})
                     modes = props.get("mode", {}).get("enum", [])
-                    print(f"   ✅ take_screenshot 可用，支持的 mode: {modes}")
+                    print(f"   ✅ vision_screenshot 可用，支持的 mode: {modes}")
 
             # ── 串行测试 ──
             # mode=editor (auto-fallback to viewport if CaptureEditorImage fails)
@@ -94,7 +94,7 @@ async def _test_mode(session, mode: str, extra: dict) -> bool:
 
     # 调用
     arguments = {"mode": mode, **extra}
-    r = await session.call_tool("take_screenshot", arguments)
+    r = await session.call_tool("vision_screenshot", arguments)
     text = _extract_text(r)
 
     print(f"  isError={r.isError}, 返回: '{text}'")

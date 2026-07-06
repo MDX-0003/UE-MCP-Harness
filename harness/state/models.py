@@ -61,28 +61,3 @@ class WorldState(BaseModel):
     drift_detected: bool = False          # 上次 Hard Boundary 检测到漂移
 
     _needs_refresh: bool = False          # load_level 后标记，由 Hard Boundary 消费后清除
-
-
-# 高频 write tool → handler 路由表（008 使用）
-# 命名约定："{toolset_short}.{tool_name}" → handler 函数名
-# 注意：这里的短名用于路由匹配，UE 实际工具名使用全限定路径
-#   C++ 工具:  "ToolsetRegistry.{ToolsetName}.{ToolName}"
-#   Python 工具: "toolset_registry.toolsets.core.{module}.{ToolsetName}.{tool_name}"
-WRITE_TOOL_HANDLERS: dict[str, str] = {
-    "set_actor_transform":      "handle_set_transform",
-    "set_properties":           "handle_set_properties",
-    "add_to_scene_from_class":  "handle_add_to_scene",
-    "add_to_scene_from_asset":  "handle_add_to_scene",
-    "remove_from_scene":        "handle_remove_from_scene",
-    "set_label":                "handle_set_label",
-    "add_tag":                  "handle_add_tag",
-    "remove_tag":               "handle_remove_tag",
-    "add_component":            "handle_add_component",
-    "remove_component":         "handle_remove_component",
-    "set_parent_component":     "handle_set_parent_component",
-    "SelectActors":             "handle_select_actors",
-    "load_level":               "handle_load_level",
-    "set_actor_folder":         "handle_set_folder",
-    "rename_folder":            "handle_rename_folder",
-    "delete_folder":            "handle_delete_folder",
-}

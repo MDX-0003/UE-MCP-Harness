@@ -1,9 +1,9 @@
-"""验证 take_screenshot mode="asset" — 显式传入 AssetPath 截图。
+"""验证 vision_screenshot mode="asset" — 显式传入 AssetPath 截图。
 
 流程:
   1. GetSelectedAssets → 取第一个已选中资产
   2. 若无选中，GetOpenAssets → 取第一个已打开的资产
-  3. 调用 take_screenshot(mode="asset", asset_path=..., hide_ui=True)
+  3. 调用 vision_screenshot(mode="asset", asset_path=..., hide_ui=True)
   4. 确认截图成功 + Vision 分析触发
 
 用法（Harness 必须运行）:
@@ -52,9 +52,9 @@ async def main() -> int:
                 return 1
 
             # ── 2. 截图 ──
-            print(f"\n2. take_screenshot mode='asset' asset_path='{asset_path}'...")
+            print(f"\n2. vision_screenshot mode='asset' asset_path='{asset_path}'...")
             ctx_before = await _get_ctx(session)
-            r = await session.call_tool("take_screenshot", {
+            r = await session.call_tool("vision_screenshot", {
                 "mode": "asset",
                 "asset_path": asset_path,
                 "hide_ui": True,

@@ -55,7 +55,7 @@ async def _verify_level_persistence_tools(ue_client) -> list[str]:
         })
         logger.debug("load_toolset: %s", LEVEL_TOOLSET_FULL_NAME)
     except Exception as e:
-        logger.debug("load_toolset 失败: %s", e)
+        logger.warning("load_toolset 失败: %s", e)
         return [f"load_toolset failed: {e}"]
 
     # 2. 检查 tools/list
@@ -144,7 +144,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     # 007 验证闭环 — 活跃 Skill 引用（build_server 内 update，VisionInterceptor 读取）
     _active_skill_ref: list[dict | None] = [None]
-    # take_screenshot 工具写入，VisionInterceptor / SnapshotRecorder 读取
+    # vision_screenshot 工具写入，VisionInterceptor / SnapshotRecorder 读取
     _pending_screenshot_ref: list = [None]  # list[harness.verification.capturer.Screenshot | None]
 
     # 012 重连钩子 — 主 session 重连后自动恢复截图 session + State Cache
@@ -197,10 +197,19 @@ def cmd_start(args: argparse.Namespace) -> int:
             session_id = ue_client.session_id or session_id
 
             # 2. 用真实 session_id 创建日志和快照记录器
-            tool_logger = ToolCallLogger(config.log_dir, session_id)
+            from harness.observability.snapshotter import _last_saved_screenshot_path as _ss_path_ref
+            tool_logger = ToolCallLogger(
+                config.log_dir, session_id,
+                get_verdict=lambda: _cache.last_vision_verdict,
+                get_screenshot_path=lambda: _ss_path_ref,
+            )
             await tool_logger.start()
 
-            snapshot_dir = config.log_dir / session_id
+            # 使用 logger 的 session_dir 确保截图和 JSONL 在同一目录
+            snapshot_dir = tool_logger.session_dir or config.log_dir / session_id
+            # Issue 015: Vision Session 归档也写入同一目录
+            if tool_logger.session_dir:
+                _vision_session_mgr.set_log_dir(tool_logger.session_dir)
             snapshot_recorder = SnapshotRecorder(
                 snapshot_dir, _cache,
                 get_pending_screenshot=lambda: _pending_screenshot_ref[0],
@@ -275,12 +284,31 @@ def cmd_start(args: argparse.Namespace) -> int:
             instructions = (
                 "你是 UE Editor Agent，通过 Harness 中间层连接 Unreal Engine 5.8。\n"
                 "自由探索模式下可用约 20 个核心工具。\n"
+                "\n"
+                "## 场景修改后的标准验证流程\n"
+                "修改任何 Actor 后，请按以下步骤验证效果：\n"
+                "1. L2 读回 — 调 get_actor_transform / get_properties 确认写入值\n"
+                "2. 相机定位 — 截图前确保视口对准了观察目标：\n"
+                "   FocusOnActors 只能调距离，不改变旋转。如果 Actor 被遮挡或视角太偏，\n"
+                "   先用以下预设角度轮换尝试：\n"
+                "     pitch=-25, yaw=45  →  经典斜前侧（推荐首选）\n"
+                "     pitch=-20, yaw=90  →  纯侧面\n"
+                "     pitch=-55, yaw=0   →  俯瞰（适合检查位置关系）\n"
+                "     pitch=-15, yaw=0   →  正面平视\n"
+                "   每次：SetCameraTransform(rotation=(pitch, yaw)) → FocusOnActors()\n"
+                "   试一个角度截一次图，确认目标可见后再做正式的 vision_screenshot 验证。\n"
+                "3. 视觉验证 — 调 vision_screenshot(question=\"具体要验证什么？\")\n"
+                "   系统会自动注入场景中的相关 Actor 信息和最近操作记录。\n"
+                "4. 追问 — 如需要，调 vision_ask 在同一 Session 内深入分析\n"
+                "5. 闭环 — 验证通过后调 vision_reset 关闭 Session\n"
+                "\n"
                 f"{skill_list}\n"
-                "调 activate_skill <名称> 激活 Skill，调 deactivate_skill 退出。\n"
+                "调 activate_skill <名称> 激活 Skill（如 activate_skill(\"验证\") 进入完整验证引导），"
+                "调 deactivate_skill 退出。\n"
                 "调 get_context 获取最新 UE 状态快照和活跃 Skill 进度。"
             )
-            await serve(server, host=config.listen_host, port=config.listen_port,
-                       instructions=instructions)
+            server.instructions = instructions
+            await serve(server, host=config.listen_host, port=config.listen_port)
 
         except Exception as e:
             logger.error("启动失败: %s", e)

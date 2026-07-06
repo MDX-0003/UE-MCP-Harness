@@ -80,14 +80,14 @@ class VisionInterceptor(ToolCallInterceptor):
         if event.error is not None:
             return
 
-        if not _is_screenshot_tool(event.name) and event.name != "take_screenshot":
+        if not _is_screenshot_tool(event.name) and event.name != "vision_screenshot":
             return
 
-        # —— 路径 A: Harness take_screenshot ——
-        if event.name == "take_screenshot":
+        # —— 路径 A: Harness vision_screenshot ——
+        if event.name == "vision_screenshot":
             screenshot = self._get_pending_screenshot()
             if screenshot is None:
-                logger.debug("take_screenshot 回调返回空，跳过 Vision 分析")
+                logger.debug("vision_screenshot 回调返回空，跳过 Vision 分析")
                 return
             image_b64 = screenshot.data_b64
         else:
@@ -115,7 +115,7 @@ class VisionInterceptor(ToolCallInterceptor):
         try:
             if self._session_mgr is not None:
                 # Issue 015 新路径：通过 SessionManager
-                if event.name in ("take_screenshot", "vision_screenshot"):
+                if event.name == "vision_screenshot":
                     meta = {
                         "width": 0, "height": 0, "mode": event.args.get("mode", "viewport") if event.args else "viewport"
                     }
@@ -166,15 +166,15 @@ def _is_screenshot_tool(name: str) -> bool:
 def _extract_image_b64(event: ToolCallCompleted) -> str | None:
     """从工具调用事件中提取 base64 图片数据。
 
-    Harness take_screenshot 工具：通过 VisionInterceptor 持有的回调获取
+    Harness vision_screenshot 工具：通过 VisionInterceptor 持有的回调获取
     Screenshot 对象（已在 capturer.capture() 内完成解析 + resize）。
 
     UE 原生截图工具（CaptureEditorImage / Screenshot 等）：
     通过 capturer.parse_screenshot() 从 raw_result 中提取——6 种格式、
     isError 检测、padding 修复、PIL resize 全部复用。
     """
-    # —— 路径 A: Harness take_screenshot 工具 ——
-    if event.name == "take_screenshot":
+    # —— 路径 A: Harness vision_screenshot ——
+    if event.name == "vision_screenshot":
         # 回调由 server.py 注入，capturer.capture() 已完成解析+resize
         return None  # 由 post_call 中通过 self._get_pending_screenshot() 获取
 

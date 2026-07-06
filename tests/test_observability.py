@@ -24,14 +24,14 @@ class TestSerializeArgs:
         assert result == {"glob": "DirectionalLight*", "limit": 10}
 
     def test_long_string_truncation(self) -> None:
-        long_val = "x" * 300
+        long_val = "x" * 600
         result = _serialize_args({"data": long_val})
-        assert len(result["data"]) == 214  # 200 + "...[truncated]"
+        assert len(result["data"]) == 514  # 500 + "...[truncated]"
         assert result["data"].endswith("...[truncated]")
 
     def test_short_string_preserved(self) -> None:
-        """短于 200 的字符串不截断。"""
-        val = "x" * 199
+        """短于 500 的字符串不截断。"""
+        val = "x" * 499
         result = _serialize_args({"data": val})
         assert result["data"] == val
 
@@ -55,8 +55,10 @@ class TestTruncate:
     def test_over_max(self) -> None:
         val = "x" * 3000
         result = _truncate(val, 2000)
-        assert len(result) == 2000 + len("...[truncated]")
-        assert result.endswith("...[truncated]")
+        # 新格式: "...[truncated, 3000 total]"
+        assert result.startswith("x" * 2000)
+        assert "[truncated" in result
+        assert "3000 total" in result
 
 
 # ---- ToolCallLogger ----
@@ -69,10 +71,10 @@ class TestToolCallLogger:
         await logger.start()
 
         assert logger.log_path is not None
-        assert logger.log_path.parent == tmp_path
-        assert logger.log_path.suffix == ".jsonl"
-        # 注意：文件在 _background_writer 第一次写入时才真正创建
-        # start() 只启动后台协程，不保证文件已存在
+        # Issue 015: JSONL 在 session 同名子目录内
+        assert logger.log_path.parent.name == "test-session"
+        assert logger.log_path.name == "tool_calls.jsonl"
+        assert logger.session_dir is not None
         await logger.stop()
 
     async def test_post_call_writes_line(self, tmp_path: Path) -> None:
@@ -88,17 +90,16 @@ class TestToolCallLogger:
         await logger.post_call(event)
         await logger.stop()
 
-        # 验证文件内容
+        # 验证文件内容（新格式: tool/input/output/ms/ts）
         content = logger.log_path.read_text(encoding="utf-8")
         assert content.endswith("\n")
         entry = json.loads(content.strip())
-        assert entry["tool_name"] == "SceneTools.find_actors"
-        assert entry["tool_input"] == {"glob": "Light*"}
-        assert entry["tool_output"] == '["Light_0"]'
+        assert entry["tool"] == "find_actors"  # 短名
+        assert entry["input"] == {"glob": "Light*"}
+        assert entry["output"] == '["Light_0"]'
         assert entry["error"] is None
-        assert entry["duration_ms"] == 42.0
-        assert "timestamp" in entry
-        assert "session_id" in entry
+        assert entry["ms"] == 42.0
+        assert "ts" in entry
 
     async def test_post_call_with_error(self, tmp_path: Path) -> None:
         logger = ToolCallLogger(tmp_path, "test-session")
@@ -116,9 +117,9 @@ class TestToolCallLogger:
 
         content = logger.log_path.read_text(encoding="utf-8")
         entry = json.loads(content.strip())
-        assert entry["tool_name"] == "SceneTools.find_actors"
+        assert entry["tool"] == "find_actors"
         assert entry["error"] == "连接超时"
-        assert entry["tool_output"] is None
+        assert entry["output"] is None
 
     async def test_multiple_events(self, tmp_path: Path) -> None:
         logger = ToolCallLogger(tmp_path, "test-session")
@@ -136,7 +137,7 @@ class TestToolCallLogger:
         assert len(lines) == 5
         for i, line in enumerate(lines):
             entry = json.loads(line)
-            assert entry["tool_name"] == f"test.tool_{i}"
+            assert entry["tool"] == f"tool_{i}"  # 短名
 
     async def test_stop_flushes_queue(self, tmp_path: Path) -> None:
         """stop() 等待队列排空后再关闭。"""
@@ -158,7 +159,7 @@ class TestToolCallLogger:
         logger = ToolCallLogger(tmp_path, "test-session")
         await logger.start()
 
-        long_output = "x" * 3000
+        long_output = "x" * 3500
         event = ToolCallCompleted(
             name="test.tool",
             args={},
@@ -169,8 +170,9 @@ class TestToolCallLogger:
 
         content = logger.log_path.read_text(encoding="utf-8")
         entry = json.loads(content.strip())
-        assert len(entry["tool_output"]) <= 2100  # 2000 + truncation marker
-        assert "...[truncated]" in entry["tool_output"]
+        # 新格式：截断上限 3000，标记格式 "...[truncated, 3500 total]"
+        assert len(entry["output"]) <= 3100
+        assert "[truncated" in entry["output"]
 
 
 # ---- stats._load_jsonl ----

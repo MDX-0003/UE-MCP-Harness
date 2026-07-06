@@ -53,9 +53,11 @@ tools_allowlist:
   - "SceneTools.add_to_scene_from_class"
   - "SceneTools.add_to_scene_from_asset"
   - "SceneTools.remove_from_scene"
-  # ---- 截图 ----
-  - "EditorAppToolset.CaptureAssetImage"
-  - "EditorAppToolset.CaptureEditorImage"
+  # ---- 相机定位（截图前置）----
+  - "EditorAppToolset.SelectActors"
+  - "EditorAppToolset.FocusOnActors"
+  - "EditorAppToolset.SetCameraTransform"
+  - "EditorAppToolset.GetCameraTransform"
 steps: |
   场景修改后，必须按顺序执行以下验证闭环。每步完成后才能进入下一步。
 
@@ -65,7 +67,18 @@ steps: |
   - 数值一致 → 进入 Step 2
   - 数值不一致 → 修正后重新写入，再次读回
 
-  ## Step 2 — 视觉截图 + 针对性提问（视觉层确认）
+  ## Step 2 — 相机定位（截图前置准备）
+  FocusOnActors 只能调距离，不改变旋转角度。如果视角不佳（俯视、背光、Actor 被遮挡），
+  用以下预设角度轮换尝试（每次：SetCameraTransform → FocusOnActors → 快速截图确认）：
+
+  - pitch=-25, yaw=45  →  经典斜前侧（推荐首选）
+  - pitch=-20, yaw=90  →  纯侧面
+  - pitch=-55, yaw=0   →  俯瞰（适合检查位置关系）
+  - pitch=-15, yaw=0   →  正面平视
+
+  试一个角度截一次图，确认目标清晰可见后进入 Step 3 做正式验证。
+
+  ## Step 3 — 视觉截图 + 针对性提问（视觉层确认）
   调 vision_screenshot(question="你的具体验证问题")。
 
   提问规则（重要）：
@@ -77,17 +90,17 @@ steps: |
     - "阴影方向是否为 {方向}？长度是否约为 {倍数} 倍？"
   - 利用系统自动注入的 dirty actor 信息（无需手动 vision_tell）
 
-  Vision 返回 ✅ PASS → 进入 Step 4
-  Vision 返回 ❌ FAIL → 进入 Step 3
+  Vision 返回 ✅ PASS → 进入 Step 5
+  Vision 返回 ❌ FAIL → 进入 Step 4
 
-  ## Step 3 — 追问细节（如需）
+  ## Step 4 — 追问细节（如需）
   如果 Vision 的 FAIL reason 不够具体，调 vision_ask(question="追问") 深入分析：
   - "具体是哪个 Actor 位置不对？偏差大约多少？"
   - "光照颜色偏差在哪个方向（太冷/太暖/太暗）？"
   - "与上一次截图相比，{Actor} 是否有变化？"
   获得足够信息后，根据 adjustment 建议修正，回到 Step 1。
 
-  ## Step 4 — 闭环
+  ## Step 5 — 闭环
   验证通过后，调 vision_reset() 关闭当前 Vision Session。
   如果还有下一个验证目标，重新从 Step 1 开始。
 

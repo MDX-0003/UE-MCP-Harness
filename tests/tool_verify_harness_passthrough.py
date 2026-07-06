@@ -1,4 +1,4 @@
-"""Harness 透传模式测试——直接调 CaptureAssetImage，不经过 take_screenshot。
+"""Harness 透传模式测试——直接调 CaptureAssetImage，不经过 vision_screenshot。
 
 验证 MultipleWriteStream bug 是否在"Harness 透传原生 UE 工具"场景下触发。
 
@@ -33,7 +33,7 @@ async def main() -> int:
                 print("❌ CaptureAssetImage 不在工具列表中（denylist 可能未放开）")
                 return 1
 
-            print(f"\n── 透传调用 {target}（不经过 take_screenshot）──")
+            print(f"\n── 透传调用 {target}（不经过 vision_screenshot）──")
             r = await session.call_tool(target, {"assetPath": "", "bShowUI": False})
 
             text = ""

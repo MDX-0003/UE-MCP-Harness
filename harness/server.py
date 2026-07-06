@@ -79,8 +79,6 @@ def build_server(
 
     # ---- 工具缓存（list_tools 调用间共享） ----
     _cached_raw_tools: list[dict] = []
-    _active_skill: dict | None = None
-
     # ---- 005 Skill Registry ----
     skill_registry = SkillRegistry()
     skill_registry.load_skills()
@@ -126,8 +124,8 @@ def build_server(
                 return []
 
         # 应用过滤（自由探索模式或 Skill 模式）
-        if _active_skill:
-            extra = frozenset(_active_skill.get("tools_allowlist", []))
+        if skill_ref and skill_ref[0]:
+            extra = frozenset(skill_ref[0].get("tools_allowlist", []))
             return apply_filter(_cached_raw_tools, config.default_tools_allowlist,
                                 extra_allowed=extra, denylist=config.default_tools_denylist)
         else:
@@ -189,42 +187,6 @@ def build_server(
             description="退出当前活跃的 Skill 模式，回到自由探索模式。",
             inputSchema={"type": "object", "properties": {}},
         ))
-        result.append(Tool(
-            name="take_screenshot",
-            description=(
-                "Harness 截图工具（推荐）。通过 capturer 模块统一获取 UE 截图，"
-                "自动 resize 到 1024x768、isError 检测、base64 修复，"
-                "并自动触发 Vision 视觉分析（通过 mimo-v2.5 模型）。"
-                "返回纯文本描述（截图尺寸 + Vision 分析结果），不含 base64。"
-                "支持三种模式：viewport（默认，仅视口画面）、editor（合成编辑器窗口）、"
-                "asset（单个资产缩略图）。"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "mode": {
-                        "type": "string",
-                        "enum": ["viewport", "editor", "asset"],
-                        "description": (
-                            "截图模式。viewport=仅视口画面（推荐，适合 Vision 分析场景光照/构图）；"
-                            "editor=合成所有编辑器窗口（含面板/菜单/工具栏）；"
-                            "asset=单个资产缩略图（需配合 asset_path）"
-                        ),
-                        "default": "viewport",
-                    },
-                    "asset_path": {
-                        "type": "string",
-                        "description": "仅 mode=asset 时有效，资产路径如 /Game/Meshes/SM_Cube",
-                    },
-                    "hide_ui": {
-                        "type": "boolean",
-                        "description": "隐藏编辑器 UI 覆盖层（gizmo、选中框线），仅 viewport/asset 有效",
-                        "default": False,
-                    },
-                },
-            },
-        ))
-
         # Issue 015: Vision Session 工具
         result.append(Tool(
             name="vision_screenshot",
@@ -307,11 +269,27 @@ def build_server(
         """路由工具调用：Harness 自有工具本地处理，UE 工具透传。
 
         Harness 自有工具:
-          - activate_skill: 激活 Skill → 设置 _active_skill
+          - activate_skill: 激活 Skill → 设置 skill_ref[0]
           - save_skill:     保存 Skill YAML → skill_registry.save_skill()
+          - vision_* :      Issue 015 Vision Session 工具
         """
 
-        nonlocal _active_skill
+        # 辅助：为 Harness 自有工具记录日志到 JSONL
+        # 未经 UE 透传路径的工具需手动触发 ToolCallLogger
+        async def _log_harness_call(tool_name, tool_args, result_text, duration_ms, error=None):
+            event = ToolCallCompleted(
+                name=tool_name, args=tool_args,
+                raw_result={"content": [{"type": "text", "text": result_text}]},
+                parsed_text=result_text,
+                error=error, duration_ms=duration_ms,
+            )
+            for ic in interceptors:
+                if type(ic).__name__ == "ToolCallLogger":
+                    try:
+                        await ic.post_call(event)
+                    except Exception as e:
+                        logger.error("日志写入失败 %s: %s", tool_name, e)
+                    break
 
         # ---- Harness 自有工具 ----
 
@@ -339,9 +317,8 @@ def build_server(
                 skill = matches[0]
                 yaml_text = skill_registry.load_skill_yaml(skill.name)
                 if yaml_text:
-                    _active_skill = _parse_skill_yaml_to_dict(yaml_text)
                     if skill_ref is not None:
-                        skill_ref[0] = _active_skill
+                        skill_ref[0] = _parse_skill_yaml_to_dict(yaml_text)
                     if snapshot_recorder is not None:
                         snapshot_recorder.on_skill_activated(skill.name, yaml_text)
                     logger.info("Skill 已激活: %s", skill.name)
@@ -393,12 +370,11 @@ def build_server(
                 )
 
         if name == "get_context":
-            prompt = assemble_system_prompt(context_providers, world_state, _active_skill)
+            prompt = assemble_system_prompt(context_providers, world_state, skill_ref[0] if skill_ref else None)
             return CallToolResult(content=[TextContent(type="text", text=prompt)])
 
         if name == "deactivate_skill":
-            was_active = _active_skill is not None
-            _active_skill = None
+            was_active = skill_ref is not None and skill_ref[0] is not None
             if skill_ref is not None:
                 skill_ref[0] = None
             if snapshot_recorder is not None:
@@ -414,6 +390,7 @@ def build_server(
         # ---- Issue 015: Vision Session 工具 ----
 
         if name == "vision_ask":
+            t0 = time.monotonic()
             if vision_session_manager is None:
                 return CallToolResult(content=[TextContent(
                     type="text", text="Vision Session Manager 未初始化。",
@@ -426,17 +403,22 @@ def build_server(
             try:
                 verdict = await vision_session_manager.ask(question)
             except ValueError as e:
+                duration_ms = (time.monotonic() - t0) * 1000
+                err_text = str(e)
+                await _log_harness_call(name, arguments, err_text, duration_ms, error=ValueError(err_text))
                 return CallToolResult(content=[TextContent(
-                    type="text", text=str(e),
+                    type="text", text=err_text,
                 )], isError=True)
-            # 注入过期警告
+            duration_ms = (time.monotonic() - t0) * 1000
             warning = vision_session_manager.check_warning()
             result_text = verdict.reason
             if warning:
                 result_text = warning + "\n\n" + result_text
+            await _log_harness_call(name, arguments, result_text, duration_ms)
             return CallToolResult(content=[TextContent(type="text", text=result_text)])
 
         if name == "vision_tell":
+            t0 = time.monotonic()
             if vision_session_manager is None:
                 return CallToolResult(content=[TextContent(
                     type="text", text="Vision Session Manager 未初始化。",
@@ -447,39 +429,44 @@ def build_server(
                     type="text", text="info 参数不能为空。",
                 )], isError=True)
             vision_session_manager.tell(info)
-            return CallToolResult(content=[TextContent(
-                type="text", text=f"已注入上下文到 Vision Session（{len(info)} 字符）。"
-            )])
+            duration_ms = (time.monotonic() - t0) * 1000
+            result_text = f"已注入上下文到 Vision Session（{len(info)} 字符）。"
+            await _log_harness_call(name, arguments, result_text, duration_ms)
+            return CallToolResult(content=[TextContent(type="text", text=result_text)])
 
         if name == "vision_reset":
+            t0 = time.monotonic()
             if vision_session_manager is None:
                 return CallToolResult(content=[TextContent(
                     type="text", text="Vision Session Manager 未初始化。",
                 )], isError=True)
             old_session = vision_session_manager.get_active()
             vision_session_manager.reset()
+            duration_ms = (time.monotonic() - t0) * 1000
             if old_session:
-                return CallToolResult(content=[TextContent(
-                    type="text", text=f"Vision Session {old_session.id} 已关闭并归档。新 Session 已创建。"
-                )])
-            return CallToolResult(content=[TextContent(
-                type="text", text="新 Vision Session 已创建。"
-            )])
+                result_text = f"Vision Session {old_session.id} 已关闭并归档。新 Session 已创建。"
+            else:
+                result_text = "新 Vision Session 已创建。"
+            await _log_harness_call(name, arguments, result_text, duration_ms)
+            return CallToolResult(content=[TextContent(type="text", text=result_text)])
 
         if name == "vision_status":
+            t0 = time.monotonic()
             if vision_session_manager is None:
                 return CallToolResult(content=[TextContent(
                     type="text", text="Vision Session Manager 未初始化。",
                 )], isError=True)
+            result_text = vision_session_manager.status_text()
+            duration_ms = (time.monotonic() - t0) * 1000
+            await _log_harness_call(name, arguments, result_text, duration_ms)
             return CallToolResult(content=[TextContent(
-                type="text", text=vision_session_manager.status_text(),
+                type="text", text=result_text,
             )])
 
-        if name in ("take_screenshot", "vision_screenshot"):
+        if name == "vision_screenshot":
             """Harness 截图工具 — 通过 capturer.capture() 统一获取截图。
 
-            vision_screenshot (Issue 015): 追加截图到当前 Vision Session + 可选针对性提问。
-            take_screenshot (旧名): 保留兼容，等同于 vision_screenshot。
+            Issue 015: 追加截图到当前 Vision Session + 可选针对性提问。
             """
             from harness.verification.capturer import capture as capturer_capture
             t0 = time.monotonic()
@@ -593,6 +580,11 @@ def build_server(
             except Exception as e:
                 logger.error("后拦截 %s 失败: %s", type(ic).__name__, e)
 
+        # 拦截器可能修改了 parsed_text（如 DriftAlertInterceptor 注入警告），
+        # 将修改同步回 result_text 确保 LLM 看到
+        if event.parsed_text is not None:
+            result_text = event.parsed_text
+
         # Hard Boundary: load_level handler 标记了 _needs_refresh
         if world_state is not None and world_state._needs_refresh:
             from harness.state.hard_boundary import execute_hard_boundary
@@ -621,7 +613,7 @@ def build_server(
 
     # 挂一个调试用属性
     server._harness_assemble_prompt = lambda state=None, skill=None: assemble_system_prompt(
-        context_providers, state, skill or _active_skill
+        context_providers, state, skill or (skill_ref[0] if skill_ref else None)
     )
 
     return server

@@ -216,18 +216,18 @@ class TestSnapshotRecorderSession:
         assert (snapshot_dir / "nonexistent" / "deep" / "screenshots").exists()
 
 
-class TestSnapshotRecorderTakeScreenshot:
-    """Harness take_screenshot 工具 — 通过 get_pending_screenshot 回调获取 Screenshot。"""
+class TestSnapshotRecorderVisionScreenshot:
+    """Harness vision_screenshot 工具 — 通过 get_pending_screenshot 回调获取 Screenshot。"""
 
-    async def test_take_screenshot_saves_png(self, snapshot_dir, world_state) -> None:
-        """take_screenshot → SnapshotRecorder 通过回调获取 Screenshot → 写 PNG 到磁盘。"""
+    async def test_vision_screenshot_saves_png(self, snapshot_dir, world_state) -> None:
+        """vision_screenshot → SnapshotRecorder 通过回调获取 Screenshot → 写 PNG 到磁盘。"""
         from harness.verification.capturer import Screenshot
         recorder = SnapshotRecorder(
             snapshot_dir, world_state,
             get_pending_screenshot=lambda: Screenshot(data_b64=_TINY_PNG_B64, width=1, height=1),
         )
         event = ToolCallCompleted(
-            name="take_screenshot",
+            name="vision_screenshot",
             args={},
             raw_result={"content": [{"type": "text", "text": "Screenshot 已获取: 1x1 image/png"}]},
             parsed_text="Screenshot 已获取: 1x1 image/png",
@@ -238,16 +238,16 @@ class TestSnapshotRecorderTakeScreenshot:
 
         screenshots = list((snapshot_dir / "screenshots").glob("*.png"))
         assert len(screenshots) == 1
-        assert screenshots[0].name.endswith("_take_screenshot.png")
+        assert screenshots[0].name.endswith("_vision_screenshot.png")
 
-    async def test_take_screenshot_null_callback_skips(self, snapshot_dir, world_state) -> None:
+    async def test_vision_screenshot_null_callback_skips(self, snapshot_dir, world_state) -> None:
         """回调返回 None → 不写文件。"""
         recorder = SnapshotRecorder(
             snapshot_dir, world_state,
             get_pending_screenshot=lambda: None,
         )
         event = ToolCallCompleted(
-            name="take_screenshot", args={},
+            name="vision_screenshot", args={},
             raw_result={}, parsed_text="...", error=None, duration_ms=200.0,
         )
         await recorder.post_call(event)
@@ -255,8 +255,8 @@ class TestSnapshotRecorderTakeScreenshot:
         screenshots_dir = snapshot_dir / "screenshots"
         assert not screenshots_dir.exists() or not list(screenshots_dir.glob("*.png"))
 
-    async def test_take_screenshot_with_verdict(self, snapshot_dir, world_state) -> None:
-        """take_screenshot + WorldState 中有 verdict → 同时写 PNG 和 verdict JSON。"""
+    async def test_vision_screenshot_with_verdict(self, snapshot_dir, world_state) -> None:
+        """vision_screenshot + WorldState 中有 verdict → 同时写 PNG 和 verdict JSON。"""
         from harness.verification.capturer import Screenshot
         world_state.last_vision_verdict = {
             "pass": True, "reason": "光照正确", "adjustment": "无需调整",
@@ -267,7 +267,7 @@ class TestSnapshotRecorderTakeScreenshot:
             get_pending_screenshot=lambda: Screenshot(data_b64=_TINY_PNG_B64, width=1, height=1),
         )
         event = ToolCallCompleted(
-            name="take_screenshot", args={},
+            name="vision_screenshot", args={},
             raw_result={}, parsed_text="...", error=None, duration_ms=200.0,
         )
         await recorder.post_call(event)

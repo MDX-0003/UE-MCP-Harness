@@ -1,0 +1,40 @@
+# 分支标记评估：修改场景中的 Actor 并验证视觉效果
+#
+# 目的：评估 LLM 是否自发使用 Vision 验证流程（L2 读回 → 针对性提问 → 追问 → 闭环）
+# 指令不点名任何工具，LLM 需自行判断需要哪些步骤。
+
+name: modify_and_verify
+description: "修改场景中的 Actor 并验证视觉效果"
+
+scene_requirement: |
+  场景中至少包含 5 个可识别的 Actor（如 StaticMesh Cube），
+  一盏 DirectionalLight，一盏 SkyLight，一个地面平面。
+  推荐使用 UE 默认模板关卡或自行搭建的测试场景。
+  所有 Actor 应清晰可见，无遮挡，光照正常。
+
+instruction: |
+  请对当前场景中的一个 Actor 做一项可见的修改（如改变位置、旋转、颜色或光照强度），
+  然后验证修改是否正确生效。整个过程请自行判断需要哪些步骤，完成后告诉我结果。
+
+metrics:
+  - id: l2_readback
+    label: "L2 读回验证"
+    description: "写操作后是否调用了 get_actor_transform 或 get_properties 确认写入值"
+  - id: targeted_question
+    label: "针对性提问"
+    description: "截图时是否携带了具体的验证问题（如 'Cube_3 是否对齐了？'）而非泛泛的 '描述场景'"
+  - id: question_specificity
+    label: "问题具体度"
+    description: "提问是否包含 Actor 名称、位置、颜色等可验证的具体属性"
+  - id: follow_up_used
+    label: "追问使用"
+    description: "是否在首次截图后调用了 vision_ask 追问细节"
+  - id: session_closed
+    label: "Session 关闭"
+    description: "是否在验证完成后调用了 vision_reset"
+  - id: loop_complete
+    label: "闭环完成"
+    description: "完整走了 L2读回 → 针对性截图 → 追问 → 关闭 的全流程"
+  - id: total_tool_calls
+    label: "总 tool call 数"
+    description: "完成任务的总 tool call 数（越低越好，但验证流程本身会增加调用数）"
