@@ -71,15 +71,24 @@ HARNESS_VISION_MODEL=claude-sonnet-4-6
 
 也可通过环境变量设置：`export HARNESS_VISION_API_KEY=...`
 
-### 3.3 `~/.claude/mcp.json` — Claude Code 发现 Harness
+### 3.3 `~/.claude.json` — Claude Code 发现 Harness
 
-**此文件在仓库外**（用户目录），必须在每台新机上手动创建。
+**此文件在仓库外**（用户目录），必须在每台新机上手动编辑。
 
-文件路径：`C:\Users\<你的用户名>\.claude\mcp.json`
+Claude Code VS Code 扩展的 MCP 服务器配置在 `~/.claude.json` 的顶层 `mcpServers` 中（**不是** `~/.claude/mcp.json`，VS Code 扩展不读那个文件）。
+
+文件路径：`C:\Users\<你的用户名>\.claude.json`
+
+在已有的 `mcpServers` 对象中添加 `ue-harness`：
 
 ```json
 {
   "mcpServers": {
+    "gortex": {
+      "args": ["mcp"],
+      "command": "C:\\Users\\...\\gortex\\gortex.exe",
+      "env": {}
+    },
     "ue-harness": {
       "type": "http",
       "url": "http://127.0.0.1:9000/mcp"
@@ -88,7 +97,9 @@ HARNESS_VISION_MODEL=claude-sonnet-4-6
 }
 ```
 
-项目级 `.claude/mcp.json` 已提交到仓库，但 Claude Code VS Code 扩展也需要用户级配置才能发现 MCP 服务器。
+Gortex 使用 stdio 模式（`command` + `args`），Harness 使用 HTTP 模式（`type` + `url`）。两种可共存。
+
+> **注意**：`~/.claude.json` 也包含会话统计、迁移标记等运行时数据，手动编辑时只改 `mcpServers` 对象，不要动其他字段。
 
 ### 3.4 `.claude/settings.json` — Claude Code 权限
 
@@ -201,7 +212,7 @@ netstat -an | grep 8000
 ### 6.3 Claude Code 找不到 Harness
 
 **检查清单**：
-1. `~/.claude/mcp.json` 是否存在且配置正确？
+1. `~/.claude.json` 的 `mcpServers` 中是否包含 `ue-harness`？
 2. Harness 是否正在运行？（`curl http://127.0.0.1:9000/mcp`）
 3. 是否已 Reload VS Code 窗口？
 4. `.claude/settings.json` 中 `permissions.allow` 是否包含 `mcp__ue-harness__*`？
@@ -220,7 +231,7 @@ netstat -an | grep 8000
 | `.claude/mcp.json` | 项目根 | ✅ | Harness MCP 服务器声明 |
 | `.claude/settings.json` | 项目根 | ✅ | Claude Code 权限白名单 |
 | `.claude/settings.local.json` | 项目根 | ❌ | 本机 Claude Code 钩子 |
-| `~/.claude/mcp.json` | 用户目录 | — | **用户级 MCP 配置（新机必建）** |
+| `~/.claude.json` | 用户目录 | — | **用户级 MCP 配置（新机必编辑 mcpServers）** |
 | `.venv/` | 项目根 | ❌ | uv 虚拟环境（`uv sync` 创建） |
 | `.ue-harness/` | 项目根 | ❌ | 本地日志、快照、缓存 |
 
