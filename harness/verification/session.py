@@ -117,17 +117,16 @@ def get_recent_writes(limit: int = 3) -> list[str]:
 def _format_write_description(short_name: str, args: dict) -> str:
     """将 write tool 的 args 格式化为简洁的人可读描述。
 
-    映射表见 Issue 015 §5.4。
+    P0-1 修复：使用 normalize_tool_args 统一参数解析，
+    处理 actor/instance 别名 + refPath/name 兼容 + values/json 别名。
     """
-    actor_name = ""
-    actor_arg = args.get("actor", {})
-    if isinstance(actor_arg, dict):
-        actor_name = actor_arg.get("name", "")
-    elif isinstance(actor_arg, str):
-        actor_name = actor_arg
+    from harness.state.normalize import normalize_tool_args
+
+    nc = normalize_tool_args(short_name, args)
+    actor_name = nc.actor_name
 
     if short_name == "set_actor_transform":
-        loc = args.get("xform", {}).get("location", {})
+        loc = nc.payload.get("xform", {}).get("location", {})
         if loc:
             return (
                 f"set_actor_transform({actor_name or '?'}, "
@@ -136,23 +135,19 @@ def _format_write_description(short_name: str, args: dict) -> str:
         return f"set_actor_transform({actor_name or '?'})"
 
     elif short_name == "set_properties":
-        json_str = args.get("json", "{}")
-        try:
-            if isinstance(json_str, str):
-                props = json.loads(json_str)
-            else:
-                props = json_str
+        props = nc.payload
+        if props:
             keys = list(props.keys())[:5]
-            key_str = ", ".join(keys)
+            key_str = ", ".join(str(k) for k in keys)
             if len(props) > 5:
                 key_str += f"...({len(props)} total)"
-        except (json.JSONDecodeError, TypeError):
+        else:
             key_str = "?"
         return f"set_properties({actor_name or '?'}, [{key_str}])"
 
     elif short_name in ("add_to_scene_from_class", "add_to_scene_from_asset"):
-        actor_type = args.get("actor_type", args.get("asset_path", "?"))
-        label = args.get("label", "")
+        actor_type = nc.payload.get("actor_type", "?")
+        label = nc.payload.get("label", "")
         result = f"add_to_scene({actor_type}"
         if label:
             result += f', label="{label}"'
@@ -163,23 +158,23 @@ def _format_write_description(short_name: str, args: dict) -> str:
         return f"remove_from_scene({actor_name or '?'})"
 
     elif short_name == "set_label":
-        label = args.get("label", "?")
+        label = nc.payload.get("label", "?")
         return f"set_label({actor_name or '?'}, \"{label}\")"
 
     elif short_name == "add_tag":
-        tag = args.get("tag", "?")
+        tag = nc.payload.get("tag", "?")
         return f"add_tag({actor_name or '?'}, \"{tag}\")"
 
     elif short_name == "remove_tag":
-        tag = args.get("tag", "?")
+        tag = nc.payload.get("tag", "?")
         return f"remove_tag({actor_name or '?'}, \"{tag}\")"
 
     elif short_name == "load_level":
-        path = args.get("path", args.get("level_path", "?"))
+        path = nc.payload.get("path", "?")
         return f"load_level({path})"
 
     elif short_name == "SelectActors":
-        actors = args.get("actors", args.get("names", []))
+        actors = nc.payload.get("actors", [])
         if isinstance(actors, list):
             return f"select_actors([{', '.join(str(a) for a in actors[:5])}])"
         return "select_actors(?)"

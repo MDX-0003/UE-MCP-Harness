@@ -10,6 +10,7 @@ import logging
 from typing import Callable, TYPE_CHECKING
 
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
+from harness.state.normalize import normalize_tool_args  # P0-1: 共享参数归一化
 from harness.verification.session import record_write  # Issue 015: 操作记录供 Vision context 注入
 
 if TYPE_CHECKING:
@@ -112,34 +113,31 @@ def _build_handlers() -> dict[str, CacheHandler]:
 # ---- 各 Handler 实现 ----
 
 def _handle_set_transform(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", "")
-    if actor_name:
-        if actor_name not in cache.actors:
-            cache.actors[actor_name] = _new_snapshot(actor_name)
-        cache.actors[actor_name].transform = event.args.get("xform", {})
-        cache.dirty_actors.add(actor_name)
+    nc = normalize_tool_args("set_actor_transform", event.args)
+    if nc.actor_name:
+        if nc.actor_name not in cache.actors:
+            cache.actors[nc.actor_name] = _new_snapshot(nc.actor_name)
+        cache.actors[nc.actor_name].transform = nc.payload.get("xform", {})
+        cache.dirty_actors.add(nc.actor_name)
+        _touch_actor(cache, nc.actor_name)
     # Issue 015: 记录到 Recent Writes Buffer
     record_write("set_actor_transform", event.args)
 
 
 def _handle_set_properties(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", "")
-    json_str = event.args.get("json", "{}")
-    if actor_name:
-        if actor_name not in cache.actors:
-            cache.actors[actor_name] = _new_snapshot(actor_name)
-        cache.dirty_actors.add(actor_name)
-        import json
-        try:
-            props = json.loads(json_str) if isinstance(json_str, str) else json_str
-            cache.actors[actor_name].properties.update(props)
-        except (json.JSONDecodeError, TypeError):
-            pass
+    nc = normalize_tool_args("set_properties", event.args)
+    if nc.actor_name:
+        if nc.actor_name not in cache.actors:
+            cache.actors[nc.actor_name] = _new_snapshot(nc.actor_name)
+        cache.dirty_actors.add(nc.actor_name)
+        _touch_actor(cache, nc.actor_name)
+        if nc.payload:
+            cache.actors[nc.actor_name].properties.update(nc.payload)
     record_write("set_properties", event.args)
 
 
 def _handle_add_to_scene(cache: WorldState, event: ToolCallCompleted) -> None:
-    # 尝试从返回值中提取新 Actor 名
+    # 尝试从返回值中提取新 Actor 名（新建 Actor 无 refPath）
     text = event.parsed_text or ""
     actor_name = _extract_actor_from_result(text)
     if not actor_name:
@@ -147,104 +145,114 @@ def _handle_add_to_scene(cache: WorldState, event: ToolCallCompleted) -> None:
     if actor_name:
         cache.actors[actor_name] = _new_snapshot(actor_name)
         cache.dirty_actors.add(actor_name)
-# 区分 class 和 asset 来源
+        _touch_actor(cache, actor_name)
+    # 区分 class 和 asset 来源
     write_name = "add_to_scene_from_class"
     record_write(write_name, event.args)
 
 
 def _handle_remove_from_scene(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", event.args.get("name", ""))
+    nc = normalize_tool_args("remove_from_scene", event.args)
+    actor_name = nc.actor_name or event.args.get("name", "")
     if actor_name and actor_name in cache.actors:
         cache.actors[actor_name].deleted = True
         cache.dirty_actors.add(actor_name)
+        _touch_actor(cache, actor_name)
     record_write("remove_from_scene", event.args)
 
 
 def _handle_set_label(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", "")
-    label = event.args.get("label", "")
-    if actor_name:
-        if actor_name not in cache.actors:
-            cache.actors[actor_name] = _new_snapshot(actor_name)
-        cache.actors[actor_name].label = label
-        cache.dirty_actors.add(actor_name)
+    nc = normalize_tool_args("set_label", event.args)
+    if nc.actor_name:
+        if nc.actor_name not in cache.actors:
+            cache.actors[nc.actor_name] = _new_snapshot(nc.actor_name)
+        cache.actors[nc.actor_name].label = nc.payload.get("label", "")
+        cache.dirty_actors.add(nc.actor_name)
+        _touch_actor(cache, nc.actor_name)
     record_write("set_label", event.args)
 
 
 def _handle_add_tag(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", "")
-    tag = event.args.get("tag", "")
-    if actor_name and tag:
-        if actor_name not in cache.actors:
-            cache.actors[actor_name] = _new_snapshot(actor_name)
-        if tag not in cache.actors[actor_name].tags:
-            cache.actors[actor_name].tags.append(tag)
-        cache.dirty_actors.add(actor_name)
+    nc = normalize_tool_args("add_tag", event.args)
+    tag = nc.payload.get("tag", "")
+    if nc.actor_name and tag:
+        if nc.actor_name not in cache.actors:
+            cache.actors[nc.actor_name] = _new_snapshot(nc.actor_name)
+        if tag not in cache.actors[nc.actor_name].tags:
+            cache.actors[nc.actor_name].tags.append(tag)
+        cache.dirty_actors.add(nc.actor_name)
+        _touch_actor(cache, nc.actor_name)
     record_write("add_tag", event.args)
 
 
 def _handle_remove_tag(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", "")
-    tag = event.args.get("tag", "")
-    if actor_name and tag and actor_name in cache.actors:
+    nc = normalize_tool_args("remove_tag", event.args)
+    tag = nc.payload.get("tag", "")
+    if nc.actor_name and tag and nc.actor_name in cache.actors:
         try:
-            cache.actors[actor_name].tags.remove(tag)
+            cache.actors[nc.actor_name].tags.remove(tag)
         except ValueError:
             pass
-        cache.dirty_actors.add(actor_name)
+        cache.dirty_actors.add(nc.actor_name)
+        _touch_actor(cache, nc.actor_name)
     record_write("remove_tag", event.args)
 
 
 def _handle_add_component(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", "")
-    comp_name = event.args.get("component_class", event.args.get("component", ""))
-    if actor_name:
-        if actor_name not in cache.actors:
-            cache.actors[actor_name] = _new_snapshot(actor_name)
+    nc = normalize_tool_args("add_component", event.args)
+    comp_name = nc.payload.get("component_class", "")
+    if nc.actor_name:
+        if nc.actor_name not in cache.actors:
+            cache.actors[nc.actor_name] = _new_snapshot(nc.actor_name)
         if comp_name:
-            cache.actors[actor_name].components.append(comp_name)
-        cache.dirty_actors.add(actor_name)
+            cache.actors[nc.actor_name].components.append(comp_name)
+        cache.dirty_actors.add(nc.actor_name)
+        _touch_actor(cache, nc.actor_name)
 
 
 def _handle_remove_component(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", "")
-    comp_name = event.args.get("component", "")
-    if actor_name:
-        cache.dirty_actors.add(actor_name)
-        if comp_name and actor_name in cache.actors:
+    nc = normalize_tool_args("remove_component", event.args)
+    comp_name = nc.payload.get("component", "")
+    if nc.actor_name:
+        cache.dirty_actors.add(nc.actor_name)
+        _touch_actor(cache, nc.actor_name)
+        if comp_name and nc.actor_name in cache.actors:
             try:
-                cache.actors[actor_name].components.remove(comp_name)
+                cache.actors[nc.actor_name].components.remove(comp_name)
             except ValueError:
                 pass
 
 
 def _handle_set_parent_component(cache: WorldState, event: ToolCallCompleted) -> None:
-    actor_name = event.args.get("actor", {}).get("name", "")
-    if actor_name and actor_name in cache.actors:
-        cache.dirty_actors.add(actor_name)
+    nc = normalize_tool_args("set_parent_component", event.args)
+    if nc.actor_name and nc.actor_name in cache.actors:
+        cache.dirty_actors.add(nc.actor_name)
+        _touch_actor(cache, nc.actor_name)
 
 
 def _handle_select_actors(cache: WorldState, event: ToolCallCompleted) -> None:
-    actors = event.args.get("actors", event.args.get("names", []))
+    nc = normalize_tool_args("SelectActors", event.args)
+    actors = nc.payload.get("actors", [])
     if isinstance(actors, list):
         cache.selected_actors = actors
 
 
 def _handle_load_level(cache: WorldState, event: ToolCallCompleted) -> None:
+    nc = normalize_tool_args("load_level", event.args)
     cache.actors.clear()
     cache.dirty_actors.clear()
     cache.dirty_toolsets.clear()
     cache.selected_actors.clear()
-    map_path = event.args.get("path", event.args.get("level_path", ""))
-    cache.map_path = map_path
+    cache.map_path = nc.payload.get("path", "")
     cache._needs_refresh = True  # 标记需 L3 刷新，由 server.py call_tool 的 post 阶段触发
 
 
 def _handle_set_folder(cache: WorldState, event: ToolCallCompleted) -> None:
-    # SceneTools.set_actor_folder — 参数语义不完全可知，保守标记 dirty
-    actor_name = event.args.get("actor", {}).get("name", "")
-    if actor_name:
-        cache.dirty_actors.add(actor_name)
+    nc = normalize_tool_args("set_actor_folder", event.args)
+    if nc.actor_name:
+        cache.dirty_actors.add(nc.actor_name)
+        if nc.actor_name in cache.actors:
+            _touch_actor(cache, nc.actor_name)
 
 
 def _handle_rename_folder(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -260,6 +268,13 @@ def _handle_delete_folder(cache: WorldState, event: ToolCallCompleted) -> None:
 def _new_snapshot(name: str) -> "ActorSnapshot":
     from harness.state.models import ActorSnapshot
     return ActorSnapshot(name=name)
+
+
+def _touch_actor(cache: WorldState, actor_name: str) -> None:
+    """更新 Actor 的 last_updated 时间戳，使 recency 排序生效 (P0-2 前置)。"""
+    from datetime import datetime, timezone
+    if actor_name in cache.actors:
+        cache.actors[actor_name].last_updated = datetime.now(timezone.utc)
 
 
 def _extract_actor_from_result(text: str) -> str:

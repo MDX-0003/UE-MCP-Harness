@@ -26,11 +26,14 @@ UE5.8 编辑器的 AI Agent 中间层。Harness 作为 MCP Server 面向 LLM（C
 ## 快速开始
 
 ```bash
+# 0. 安装（需要 Python 3.12+ 和 uv）
+uv sync
+
 # 1. 在 UE 编辑器中启用 MCP Server
 #    Editor Preference → General → Model Context Protocol → Auto Start Server
 
 # 2. 启动 Harness
-harness start --ue-port 8000 --listen-port 9000
+uv run harness start --ue-port 8000 --listen-port 9000
 
 # 3. 在 Claude Code 或其他 MCP 客户端中连接到 localhost:9000
 ```
@@ -58,6 +61,7 @@ ue-agent-harness/
 │   ├── recovery/         # 错误恢复
 │   ├── safety/           # 安全护栏
 │   └── observability/    # 日志与回放
+├── branch_mark/          # 离线评分工具（独立于 Harness）
 ├── skills/               # Harness Skill 示例
 ├── tests/                # 测试
 ├── docs/                 # 文档

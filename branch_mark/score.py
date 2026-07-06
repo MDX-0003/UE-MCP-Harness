@@ -78,12 +78,27 @@ def _short_name(full: str) -> str:
     return full.split(".")[-1] if "." in full else full
 
 
-def _extract_actor_from_args(args: Any) -> str:
-    """从 tool args 中提取 Actor 名。"""
+def _extract_actor_from_args(short_name: str, args: Any) -> str:
+    """从 tool args 中提取 Actor 名（P0-1 修复：使用共享归一化）。
+
+    兼容 actor/instance 别名和 refPath/name 新旧格式。
+    """
     if not isinstance(args, dict):
         return ""
-    actor = args.get("actor", {})
+    try:
+        from harness.state.normalize import normalize_tool_args
+        nc = normalize_tool_args(short_name, args)
+        if nc.actor_name:
+            return nc.actor_name
+    except ImportError:
+        pass
+    # fallback: 旧格式（直接 name 字段、字符串 actor、无 actor 键的 name 字段）
+    actor = args.get("actor") or args.get("instance") or {}
     if isinstance(actor, dict):
+        name = actor.get("refPath", "")
+        if name:
+            name = name.rsplit(".", 1)[-1] if "." in name else name.rsplit(":", 1)[-1] if ":" in name else name
+            return name
         return actor.get("name", "")
     if isinstance(actor, str):
         return actor
@@ -202,7 +217,7 @@ def score_jsonl(path: Path | str) -> ScoreResult:
                 known_actors.add(m.group(1))
         if short in _READ_TOOLS or short in _WRITE_TOOLS:
             args = c.get("tool_input") or c.get("input", {})
-            name = _extract_actor_from_args(args)
+            name = _extract_actor_from_args(short, args)
             if name:
                 known_actors.add(name)
 
@@ -216,9 +231,9 @@ def score_jsonl(path: Path | str) -> ScoreResult:
         short = _short_name(tool_name)
         args = c.get("tool_input") or c.get("input", {})
         if short in _WRITE_TOOLS:
-            last_write_actor = _extract_actor_from_args(args)
+            last_write_actor = _extract_actor_from_args(short, args)
         elif short in _READ_TOOLS and last_write_actor:
-            read_actor = _extract_actor_from_args(args)
+            read_actor = _extract_actor_from_args(short, args)
             if read_actor and read_actor == last_write_actor:
                 l2_readback = True
                 break

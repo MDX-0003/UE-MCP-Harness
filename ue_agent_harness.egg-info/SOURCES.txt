@@ -26,6 +26,7 @@ harness/state/__init__.py
 harness/state/hard_boundary.py
 harness/state/interceptor.py
 harness/state/models.py
+harness/state/normalize.py
 harness/state/refresher.py
 harness/verification/__init__.py
 harness/verification/capturer.py

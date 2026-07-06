@@ -30,9 +30,9 @@ class ToolCallCompleted:
                       如果 result 不是 MCP content array 格式，则 parsed_text = str(raw_result)
     """
 
-    name: str
-    args: dict
-    raw_result: Any = None          # JsonRpcResponse.result — 完整原始结果
+    name: str # 工具的全限定名
+    args: dict # 调用参数（LLM 传过来的）
+    raw_result: Any = None          # UE 返回的原始 JSON-RPC result
     parsed_text: str | None = None  # 已提取的 content[0].text，handler 可直读
     error: Exception | None = None
     duration_ms: float = 0.0

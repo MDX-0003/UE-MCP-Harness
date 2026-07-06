@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git remote *)",
+      "Bash(echo \"Remote show exit code: $?\")",
+      "Bash(git push *)",
+      "Bash(git pull *)",
+      "Bash(uv run *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_state.py tests/test_session.py -v)"
+    ]
+  }
+}
