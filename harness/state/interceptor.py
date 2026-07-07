@@ -10,7 +10,7 @@ import logging
 from typing import Callable, TYPE_CHECKING
 
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
-from harness.state.normalize import normalize_tool_args  # P0-1: 共享参数归一化
+from harness.state.normalize import normalize_tool_args, _parse_ref_path  # P0-1: 共享参数归一化
 from harness.verification.session import record_write  # Issue 015: 操作记录供 Vision context 注入
 
 if TYPE_CHECKING:
@@ -91,6 +91,7 @@ def _build_handlers() -> dict[str, CacheHandler]:
         "set_actor_folder":        _handle_set_folder,
         "rename_folder":           _handle_rename_folder,
         "delete_folder":           _handle_delete_folder,
+        "get_class":               _handle_get_class,   # Step 4: 读结果回填
     }
 
     # 拉长名 → handler：为每个短名生成全限定路径映射
@@ -137,13 +138,20 @@ def _handle_set_properties(cache: WorldState, event: ToolCallCompleted) -> None:
 
 
 def _handle_add_to_scene(cache: WorldState, event: ToolCallCompleted) -> None:
-    # 尝试从返回值中提取新 Actor 名（新建 Actor 无 refPath）
+    # P0-1: 归一化参数——从 refPath / instance 提取 actor 名
+    nc = normalize_tool_args("add_to_scene_from_class", event.args)
+    # 尝试从返回值中提取新 Actor 名（新建 Actor 无 refPath，归一化也拿不到名字）
     text = event.parsed_text or ""
-    actor_name = _extract_actor_from_result(text)
-    if not actor_name:
-        actor_name = event.args.get("actor_name", event.args.get("name", ""))
+    actor_name = _extract_actor_from_result(text) or nc.actor_name
     if actor_name:
-        cache.actors[actor_name] = _new_snapshot(actor_name)
+        snap = _new_snapshot(actor_name)
+        # Step 3: 从 add_to_scene 参数中取 class/asset 名填入
+        actor_type = nc.payload.get("actor_type", "")
+        if actor_type:
+            # add_to_scene_from_asset 时 actor_type 是 asset path（如 /Game/Assets/SM_Chair），
+            # 取尾段作为近似类名；add_to_scene_from_class 时就是直接类名（如 "PointLight"）
+            snap.class_name = actor_type.rsplit("/", 1)[-1] if "/" in actor_type else actor_type
+        cache.actors[actor_name] = snap
         cache.dirty_actors.add(actor_name)
         _touch_actor(cache, actor_name)
     # 区分 class 和 asset 来源
@@ -261,6 +269,34 @@ def _handle_rename_folder(cache: WorldState, event: ToolCallCompleted) -> None:
 
 def _handle_delete_folder(cache: WorldState, event: ToolCallCompleted) -> None:
     cache.dirty_toolsets.add("SceneTools")
+
+
+def _handle_get_class(cache: WorldState, event: ToolCallCompleted) -> None:
+    """Step 4: LLM 调 get_class 后，从返回值回填 class_name。
+
+    输入:  {"instance": {"refPath": "/Game/.../SpotLight_0"}}
+    输出:  {"returnValue": {"refPath": "/Script/Engine.SpotLight"}}
+    → 提取尾段 "SpotLight" → 写入对应快照。
+    """
+    nc = normalize_tool_args("get_class", event.args)
+    if not nc.actor_name:
+        return
+
+    text = event.parsed_text or ""
+    import json
+    try:
+        data = json.loads(text) if isinstance(text, str) else text
+        if isinstance(data, dict):
+            rv = data.get("returnValue", {})
+            if isinstance(rv, dict):
+                class_ref = rv.get("refPath", "")
+                if class_ref and nc.actor_name in cache.actors:
+                    class_name, _ = _parse_ref_path(class_ref)
+                    if class_name:
+                        cache.actors[nc.actor_name].class_name = class_name
+                        logger.debug("get_class 回填: %s → %s", nc.actor_name, class_name)
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
 
 
 # ---- 辅助 ----

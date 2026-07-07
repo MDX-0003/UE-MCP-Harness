@@ -213,6 +213,41 @@ class TestExtractShortName:
         assert extract_short_name("vision_screenshot") == "vision_screenshot"
 
 
+class TestInferClassName:
+    """测试 infer_class_name — 从 UE 默认命名规则推断 class name。"""
+
+    def test_standard_pattern(self) -> None:
+        from harness.state.normalize import infer_class_name
+        assert infer_class_name("SpotLight_0") == "SpotLight"
+        assert infer_class_name("SpotLight_1") == "SpotLight"
+        assert infer_class_name("CineCameraActor_3") == "CineCameraActor"
+        assert infer_class_name("StaticMeshActor_7") == "StaticMeshActor"
+        assert infer_class_name("PointLight_42") == "PointLight"
+
+    def test_no_suffix_returns_none(self) -> None:
+        from harness.state.normalize import infer_class_name
+        assert infer_class_name("KeyLight") is None
+        assert infer_class_name("MainKey") is None
+        assert infer_class_name("RedFillLight") is None
+
+    def test_lowercase_prefix_returns_none(self) -> None:
+        from harness.state.normalize import infer_class_name
+        assert infer_class_name("lowercase_0") is None
+
+    def test_custom_name_with_number_suffix(self) -> None:
+        from harness.state.normalize import infer_class_name
+        # 用户自定义名 MyActor_0 → 推断为 MyActor，虽非引擎类名但比 Unknown 有用
+        assert infer_class_name("MyActor_0") == "MyActor"
+
+    def test_empty_string(self) -> None:
+        from harness.state.normalize import infer_class_name
+        assert infer_class_name("") is None
+
+    def test_only_underscore_number(self) -> None:
+        from harness.state.normalize import infer_class_name
+        assert infer_class_name("_0") is None
+
+
 class TestIntegration:
     """模拟完整链路的集成测试：LLM 调用 → normalize → handler 写入缓存。"""
 

@@ -50,7 +50,10 @@ async def full_refresh(
         for name in actor_names:
             if name not in cache.actors:
                 from harness.state.models import ActorSnapshot
-                cache.actors[name] = ActorSnapshot(name=name)
+                from harness.state.normalize import infer_class_name
+                snap = ActorSnapshot(name=name)
+                snap.class_name = infer_class_name(name)  # Step 2: 名称推断填入
+                cache.actors[name] = snap
         logger.info("L3 刷新: 发现 %d 个 Actor", len(actor_names))
     except Exception as e:
         logger.warning("全量 Actor 扫描失败: %s", e)
@@ -78,8 +81,16 @@ async def full_refresh(
 
 
 def _parse_actor_list(result: str) -> list[str]:
-    """从工具返回值中解析 Actor 名称列表。"""
+    """从工具返回值中解析 Actor 名称列表。
+
+    支持三种返回格式：
+      1. returnValue 包装的对象列表: {"returnValue": [{"refPath": "/Game/.../SpotLight_0"}, ...]}
+      2. 纯字符串列表: ["SpotLight_0", "PointLight_1"]
+      3. 逗号分隔字符串: "SpotLight_0, PointLight_1"
+    """
     import json
+    from harness.state.normalize import _parse_ref_path
+
     try:
         parsed = json.loads(result) if isinstance(result, str) else result
         if isinstance(parsed, dict):
@@ -88,10 +99,29 @@ def _parse_actor_list(result: str) -> list[str]:
                 if isinstance(item, dict) and item.get("type") == "text":
                     text = item.get("text", "")
                     try:
-                        names = json.loads(text)
-                        if isinstance(names, list):
-                            return names
+                        data = json.loads(text)
+
+                        # 格式 1: returnValue 包装
+                        if isinstance(data, dict) and "returnValue" in data:
+                            data = data["returnValue"]
+
+                        if isinstance(data, list):
+                            if not data:
+                                return []
+                            # 格式 1: 对象列表 → 从 refPath 提取名字
+                            if isinstance(data[0], dict):
+                                names: list[str] = []
+                                for obj in data:
+                                    ref = obj.get("refPath", "") if isinstance(obj, dict) else ""
+                                    if ref:
+                                        name, _ = _parse_ref_path(ref)
+                                        if name:
+                                            names.append(name)
+                                return names
+                            # 格式 2: 纯字符串列表
+                            return [str(n) for n in data]
                     except json.JSONDecodeError:
+                        # 格式 3: 逗号分隔字符串
                         return [n.strip() for n in text.split(",") if n.strip()]
     except json.JSONDecodeError:
         pass

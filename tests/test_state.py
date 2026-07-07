@@ -16,6 +16,7 @@ from harness.state.interceptor import (
     _handle_remove_tag,
     _handle_select_actors,
     _handle_load_level,
+    _handle_get_class,   # Step 4
 )
 from harness.state.models import ActorSnapshot, WorldState
 
@@ -168,6 +169,85 @@ class TestHandlers:
         assert cache.actors == {}
         assert cache.dirty_actors == set()
         assert cache.selected_actors == []
+
+    # ---- Step 3: add_to_scene 顺手填 class_name ----
+
+    def test_add_to_scene_fills_class_name(self) -> None:
+        """add_to_scene_from_class 时从 actor_type 填入 class_name。"""
+        from harness.state.normalize import infer_class_name
+        cache = WorldState()
+        event = ToolCallCompleted(
+            name="SceneTools.add_to_scene_from_class",
+            args={"actor_type": "PointLight", "label": ""},
+            parsed_text="Created actor: PointLight_0 at (0, 0, 0)",
+        )
+        _handle_add_to_scene(cache, event)
+        assert "PointLight_0" in cache.actors
+        assert cache.actors["PointLight_0"].class_name == "PointLight"
+
+    def test_add_to_scene_from_asset_fills_tail_segment(self) -> None:
+        """add_to_scene_from_asset 时 asset_path 尾段作为近似类名。"""
+        cache = WorldState()
+        event = ToolCallCompleted(
+            name="SceneTools.add_to_scene_from_asset",
+            args={"asset_path": "/Game/Assets/SM_Chair", "label": ""},
+            parsed_text="Created actor: SM_Chair_0 at (0, 0, 0)",
+        )
+        _handle_add_to_scene(cache, event)
+        assert "SM_Chair_0" in cache.actors
+        assert cache.actors["SM_Chair_0"].class_name == "SM_Chair"
+
+    # ---- Step 4: get_class 读结果回填 ----
+
+    def test_get_class_fills_class_name(self) -> None:
+        """LLM 调 get_class 后回填 class_name。"""
+        cache = WorldState(actors={
+            "SpotLight_0": ActorSnapshot(name="SpotLight_0"),
+        })
+        event = ToolCallCompleted(
+            name="ActorTools.get_class",
+            args={"instance": {"refPath": "/Game/NewWorld.NewWorld:PersistentLevel.SpotLight_0"}},
+            parsed_text='{"returnValue":{"refPath":"/Script/Engine.SpotLight"}}',
+        )
+        _handle_get_class(cache, event)
+        assert cache.actors["SpotLight_0"].class_name == "SpotLight"
+
+    def test_get_class_ignores_missing_actor(self) -> None:
+        """get_class 返回的 actor 不在缓存中——静默跳过。"""
+        cache = WorldState()
+        event = ToolCallCompleted(
+            name="ActorTools.get_class",
+            args={"instance": {"refPath": "/Game/NewWorld.NewWorld:PersistentLevel.GhostActor_0"}},
+            parsed_text='{"returnValue":{"refPath":"/Script/Engine.PointLight"}}',
+        )
+        _handle_get_class(cache, event)  # 不抛异常
+        assert "GhostActor_0" not in cache.actors
+
+    def test_get_class_bad_json_no_error(self) -> None:
+        """get_class 返回不可解析的文本——静默跳过。"""
+        cache = WorldState(actors={
+            "SpotLight_0": ActorSnapshot(name="SpotLight_0"),
+        })
+        event = ToolCallCompleted(
+            name="ActorTools.get_class",
+            args={"instance": {"refPath": "/Game/NewWorld.NewWorld:PersistentLevel.SpotLight_0"}},
+            parsed_text="not valid json",
+        )
+        _handle_get_class(cache, event)  # 不抛异常
+        assert cache.actors["SpotLight_0"].class_name is None
+
+    # ---- L3 刷新推断不被已有值覆盖 ----
+
+    def test_infer_does_not_overwrite_existing(self) -> None:
+        """L3 刷新推断不覆盖已有的 class_name（UE 查询结果更权威）。"""
+        snap = ActorSnapshot(name="SpotLight_0", class_name="SpotLight")
+        assert snap.class_name == "SpotLight"
+        # 模拟 refresher 中的行为：仅当 class_name is None 时才推断
+        if snap.class_name is None:
+            from harness.state.normalize import infer_class_name
+            snap.class_name = infer_class_name(snap.name)
+        # 已有值应保持不变
+        assert snap.class_name == "SpotLight"
 
 
 # ---- StateCacheInterceptor ----

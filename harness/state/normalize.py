@@ -202,3 +202,26 @@ def _extract_payload(short_name: str, args: dict) -> dict:
 def extract_short_name(full_name: str) -> str:
     """从全限定工具名中提取短名（如 set_actor_transform）。"""
     return full_name.split(".")[-1] if "." in full_name else full_name
+
+
+# ---- class_name 推断 ----
+
+def infer_class_name(actor_name: str) -> str | None:
+    """从 UE 默认命名规则推断 class name。
+
+    UE 自动生成的 Actor 名为 {ClassName}_{N} 格式：
+      SpotLight_0       → "SpotLight"
+      StaticMeshActor_7 → "StaticMeshActor"
+      CineCameraActor_3 → "CineCameraActor"
+
+    改名 Actor 无 _数字 后缀 → None：
+      KeyLight → None（无法推断）
+
+    误判风险可接受——MyActor_0 推断为 MyActor 即便不是引擎类名，
+    也远比 "Unknown" 有信息量。
+    """
+    import re
+    m = re.match(r'^([A-Z][A-Za-z0-9]*?)_(\d+)$', actor_name)
+    if m:
+        return m.group(1)
+    return None
