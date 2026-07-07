@@ -43,18 +43,24 @@ def mock_vision_agent() -> VisionSubAgent:
 @pytest.fixture
 def passing_verdict() -> VisionVerdict:
     return VisionVerdict(
-        pass_=True,
-        reason="光照角度正确，阴影长度符合预期",
-        adjustment="无需调整",
+        answer="光照角度正确，阴影长度符合预期",
+        confidence="high",
+        caveats=[],
+        observations=[
+            {"what": "光照角度", "finding": "方向光角度约为 30 度", "confidence": "high"},
+        ],
     )
 
 
 @pytest.fixture
 def failing_verdict() -> VisionVerdict:
     return VisionVerdict(
-        pass_=False,
-        reason="亮度过高，方向光角度仍接近正午",
-        adjustment="调整方向光角度降至 15 度，强度降至 30%",
+        answer="亮度过高，方向光角度仍接近正午",
+        confidence="high",
+        caveats=["当前截图曝光度较高，可能影响亮度判断"],
+        observations=[
+            {"what": "亮度", "finding": "过曝，高光区域丢失细节", "confidence": "high"},
+        ],
     )
 
 
@@ -175,8 +181,8 @@ class TestVisionInterceptorResultWriting:
             await interceptor.post_call(event)
 
             assert world_state.last_vision_verdict is not None
-            assert world_state.last_vision_verdict["pass"] is True
-            assert "光照" in world_state.last_vision_verdict["reason"]
+            assert world_state.last_vision_verdict["confidence"] == "high"
+            assert "光照" in world_state.last_vision_verdict["answer"]
             assert "at" in world_state.last_vision_verdict
 
     async def test_failing_verdict_written_to_cache(
@@ -190,9 +196,9 @@ class TestVisionInterceptorResultWriting:
             await interceptor.post_call(event)
 
             assert world_state.last_vision_verdict is not None
-            assert world_state.last_vision_verdict["pass"] is False
-            assert "调整" in world_state.last_vision_verdict["reason"] or \
-                   "调整" in world_state.last_vision_verdict.get("adjustment", "")
+            assert world_state.last_vision_verdict["confidence"] == "high"
+            assert "亮度" in world_state.last_vision_verdict["answer"]
+            assert len(world_state.last_vision_verdict.get("caveats", [])) > 0
 
     async def test_vision_verdict_overwrites_previous(
         self, mock_vision_agent, world_state, passing_verdict, failing_verdict
@@ -205,14 +211,16 @@ class TestVisionInterceptorResultWriting:
             await interceptor.post_call(
                 _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
             )
-            assert world_state.last_vision_verdict["pass"] is True
+            assert world_state.last_vision_verdict["confidence"] == "high"
+            assert "光照" in world_state.last_vision_verdict["answer"]
 
             # Second call: failing (overwrites)
             mock_check.return_value = failing_verdict
             await interceptor.post_call(
                 _screenshot_event("ToolsetRegistry.EditorAppToolset.CaptureEditorImage")
             )
-            assert world_state.last_vision_verdict["pass"] is False
+            assert world_state.last_vision_verdict["confidence"] == "high"
+            assert "亮度" in world_state.last_vision_verdict["answer"]
 
 
 class TestVisionInterceptorFailureTolerance:

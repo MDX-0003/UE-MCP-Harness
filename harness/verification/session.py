@@ -24,7 +24,6 @@ from typing import Any, TYPE_CHECKING
 from harness.config import Config
 from harness.verification.vision_agent import (
     VisionSubAgent, VisionVerdict,
-    VISION_SYSTEM_PROMPT_DESCRIBE, VISION_SYSTEM_PROMPT_VERIFY,
 )
 
 if TYPE_CHECKING:
@@ -321,7 +320,102 @@ def build_scene_context(
     if world_state.dirty_toolsets:
         parts.append(f"\n⚠ 未追踪的工具集：{', '.join(sorted(world_state.dirty_toolsets)[:5])}")
 
+    # 附近几何体：当焦点 Actor 是灯光时，自动列出附近的几何体
+    _append_nearby_geometry(parts, active_actors, mentioned, dirty)
+
     return "场景上下文（来自 State Cache）：\n" + "\n".join(parts)
+
+
+# 灯光类 Actor 的类型名——用于判断是否需要在上下文中展示附近几何体
+_LIGHT_CLASS_NAMES = {
+    "PointLight", "SpotLight", "DirectionalLight",
+    "RectLight", "SkyLight",
+}
+# 附近几何体的搜索半径（UE 单位）
+_NEARBY_GEOMETRY_RADIUS = 5000.0
+# 最多展示的附近几何体数
+_NEARBY_GEOMETRY_MAX = 5
+
+
+def _append_nearby_geometry(
+    parts: list[str],
+    active_actors: dict[str, Any],
+    mentioned: set[str],
+    dirty: set[str],
+) -> None:
+    """当焦点 Actor 是灯光时，在上下文中追加附近的几何体信息。
+
+    帮助 Vision 判断灯光是否能照到任何表面，也帮助 LLM 做空间检查。
+    """
+    # 找出所有焦点中的灯光 Actor
+    focus_actors = mentioned | dirty
+    light_actors = {
+        name: snap for name, snap in active_actors.items()
+        if name in focus_actors
+        and snap.class_name in _LIGHT_CLASS_NAMES
+        and snap.transform
+        and snap.transform.get("location")
+    }
+    if not light_actors:
+        return
+
+    # 收集有位置信息的非灯光 Actor 作为几何体候选
+    geometry_actors = {
+        name: snap for name, snap in active_actors.items()
+        if name not in light_actors
+        and snap.class_name not in _LIGHT_CLASS_NAMES
+        and snap.transform
+        and snap.transform.get("location")
+    }
+    if not geometry_actors:
+        return
+
+    # 对每盏灯计算附近几何体
+    nearby_lines: list[str] = []
+    for light_name, light_snap in light_actors.items():
+        light_loc = light_snap.transform["location"]
+        lx = light_loc.get("x", 0)
+        ly = light_loc.get("y", 0)
+        lz = light_loc.get("z", 0)
+
+        # 计算距离并排序
+        distances: list[tuple[float, str, Any]] = []
+        for geo_name, geo_snap in geometry_actors.items():
+            geo_loc = geo_snap.transform["location"]
+            gx = geo_loc.get("x", 0)
+            gy = geo_loc.get("y", 0)
+            gz = geo_loc.get("z", 0)
+            d = ((lx - gx) ** 2 + (ly - gy) ** 2 + (lz - gz) ** 2) ** 0.5
+            if d <= _NEARBY_GEOMETRY_RADIUS:
+                distances.append((d, geo_name, geo_snap))
+
+        distances.sort(key=lambda x: x[0])
+        if not distances:
+            nearby_lines.append(
+                f"\n⚠ {light_name} ({light_snap.class_name}) "
+                f"位于 ({lx:.0f},{ly:.0f},{lz:.0f})，"
+                f"半径 {_NEARBY_GEOMETRY_RADIUS:.0f} 内无可见几何体——"
+                f"灯光可能无法照到任何表面！"
+            )
+        else:
+            nearby_lines.append(
+                f"\n{light_name} ({light_snap.class_name}) "
+                f"位于 ({lx:.0f},{ly:.0f},{lz:.0f})，附近几何体："
+            )
+            for d, geo_name, geo_snap in distances[:_NEARBY_GEOMETRY_MAX]:
+                geo_loc = geo_snap.transform["location"]
+                nearby_lines.append(
+                    f"  - {geo_name}"
+                    + (f" ({geo_snap.class_name})" if geo_snap.class_name else "")
+                    + f" | 距离={d:.0f}"
+                    + f" | 位置=({geo_loc.get('x',0):.0f},{geo_loc.get('y',0):.0f},{geo_loc.get('z',0):.0f})"
+                )
+            if len(distances) > _NEARBY_GEOMETRY_MAX:
+                nearby_lines.append(f"  ... 等共 {len(distances)} 个几何体在范围内")
+
+    if nearby_lines:
+        parts.append("\n---\n灯光空间关系：")
+        parts.extend(nearby_lines)
 
 
 def _format_actor_detail(name: str, snap: Any) -> str:
@@ -510,6 +604,19 @@ class VisionSessionManager:
             logger.info("Vision Session %s 已关闭并归档", old.id)
         return self.start()
 
+    def close_active(self) -> None:
+        """关闭并归档当前 Vision Session（不创建新 Session）。
+
+        用于 Harness 正常关闭时自动归档未关闭的 Vision Session。
+        """
+        if self._active and self._active.is_active:
+            self._active.is_active = False
+            self._archive.append(self._active)
+            if self._log_dir is not None:
+                self._write_session_json(self._active)
+            logger.info("Vision Session %s 已随主 Session 关闭自动归档", self._active.id)
+            self._active = None
+
     def get_active(self) -> VisionSession | None:
         """获取当前活跃 Session。"""
         return self._active if self._active and self._active.is_active else None
@@ -552,6 +659,29 @@ class VisionSessionManager:
             logger.debug("Vision Session 已归档: %s", file_path)
         except Exception as e:
             logger.warning("Vision Session 归档失败: %s", e)
+
+    def _append_vision_call_log(
+        self, call_type: str, question: str, verdict_dict: dict
+    ) -> None:
+        """实时写入 vision_calls.jsonl——每次 Vision 调用立即落盘。
+
+        包含 question 和 answer 的完整配对，不受 interceptor off-by-one 影响。
+        """
+        if self._log_dir is None:
+            return
+        try:
+            import json as _json
+            line = _json.dumps({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "type": call_type,
+                "question": question[:1000],
+                "verdict": verdict_dict,
+            }, ensure_ascii=False)
+            log_path = self._log_dir / "vision_calls.jsonl"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass  # 写入失败不阻断主流程
 
     # ---- Vision 交互 ----
 
@@ -605,9 +735,10 @@ class VisionSessionManager:
 
         # 记录
         verdict_dict = {
-            "pass": verdict.pass_,
-            "reason": verdict.reason[:1000],
-            "adjustment": verdict.adjustment,
+            "answer": verdict.answer[:2000],
+            "confidence": verdict.confidence,
+            "caveats": verdict.caveats[:5],
+            "observations": verdict.observations[:10],
             "question": question[:500] if question else "",
         }
         session.question_log.append({
@@ -616,6 +747,9 @@ class VisionSessionManager:
             "at": datetime.now(timezone.utc).isoformat(),
         })
         session.last_verdict = verdict_dict
+
+        # 实时写入 vision_calls.jsonl：question + answer 一对，不受 off-by-one 影响
+        self._append_vision_call_log("screenshot", question or "(描述模式)", verdict_dict)
 
         return verdict
 
@@ -646,9 +780,10 @@ class VisionSessionManager:
         )
 
         verdict_dict = {
-            "pass": verdict.pass_,
-            "reason": verdict.reason[:1000],
-            "adjustment": verdict.adjustment,
+            "answer": verdict.answer[:2000],
+            "confidence": verdict.confidence,
+            "caveats": verdict.caveats[:5],
+            "observations": verdict.observations[:10],
             "question": question[:500],
         }
         session.question_log.append({
@@ -657,6 +792,9 @@ class VisionSessionManager:
             "at": datetime.now(timezone.utc).isoformat(),
         })
         session.last_verdict = verdict_dict
+
+        # 实时写入 vision_calls.jsonl
+        self._append_vision_call_log("ask", question, verdict_dict)
 
         return verdict
 

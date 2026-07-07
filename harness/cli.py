@@ -302,18 +302,49 @@ def cmd_start(args: argparse.Namespace) -> int:
                 "4. 追问 — 如需要，调 vision_ask 在同一 Session 内深入分析\n"
                 "5. 闭环 — 验证通过后调 vision_reset 关闭 Session\n"
                 "\n"
+                "## ⚠ 灯光修改专项 SOP（必须遵守）\n"
+                "修改灯光属性（颜色/强度/旋转）前，必须先完成空间检查。\n"
+                "灯光的视觉效果需要在被照亮的表面上判断，不能看编辑器图标/gizmo 颜色。\n"
+                "\n"
+                "前置检查步骤：\n"
+                "a. 确认灯光附近有可见几何体：\n"
+                "   调 get_actor_transform 获取灯光位置，\n"
+                "   调 get_actor_transform 获取场景中 StaticMeshActor 的位置，\n"
+                "   计算距离：PointLight/SpotLight 默认有效半径约 1000 UE 单位，\n"
+                "   RectLight 约 2000 单位。如果所有几何体距离都超过有效半径，\n"
+                "   先调 set_actor_transform 把灯移到目标物体附近。\n"
+                "b. 确认灯光朝向目标：\n"
+                "   SpotLight：调 rotation 使光锥对准目标物体。\n"
+                "   可从相机对准目标物体来判断——不会被自身遮挡的视角 = 灯光应该来的方向。\n"
+                "c. 确认后再改属性：\n"
+                "   上面两步全部确认后，再调 set_properties 改 LightColor/Intensity。\n"
+                "d. 验证时关注被照亮的表面，不是图标：\n"
+                "   vision_screenshot 的问题要包含\"被照亮的表面呈现什么颜色\"，\n"
+                "   不要问\"图标是否可见\"或\"图标是什么颜色\"。\n"
+                "\n"
+                "⚠ 如果 Vision 返回\"场景为空\"、\"无被照表面\"、\"无法观察光照效果\"：\n"
+                "→ 不要继续调整灯光属性！回到前置检查步骤 a，先把灯移到几何体附近。\n"
+                "\n"
                 f"{skill_list}\n"
                 "调 activate_skill <名称> 激活 Skill（如 activate_skill(\"验证\") 进入完整验证引导），"
                 "调 deactivate_skill 退出。\n"
                 "调 get_context 获取最新 UE 状态快照和活跃 Skill 进度。"
             )
             server.instructions = instructions
+            # 将 instructions 写入 session 目录，供复盘分析
+            if tool_logger is not None and tool_logger.session_dir is not None:
+                inst_path = tool_logger.session_dir / "instructions.md"
+                inst_path.write_text(instructions, encoding="utf-8")
+                logger.debug("Instructions 已写入: %s", inst_path)
             await serve(server, host=config.listen_host, port=config.listen_port)
 
         except Exception as e:
             logger.error("启动失败: %s", e)
             raise
         finally:
+            # 主 Session 关闭前自动归档未关闭的 Vision Session
+            if _vision_session_mgr is not None:
+                _vision_session_mgr.close_active()
             if snapshot_recorder is not None:
                 snapshot_recorder.write_session_json()
             if tool_logger is not None:

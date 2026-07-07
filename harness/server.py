@@ -517,11 +517,28 @@ def build_server(
             vision_info = ""
             if world_state is not None and world_state.last_vision_verdict:
                 v = world_state.last_vision_verdict
-                status = "✅ PASS" if v.get("pass") else "❌ FAIL"
-                reason = v.get("reason", "")
-                vision_info = f"\n\n[Vision 分析] {status}\n{reason}"
-                if v.get("adjustment"):
-                    vision_info += f"\n调整建议: {v['adjustment']}"
+                badges = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+                confidence = v.get("confidence", "medium")
+                badge = badges.get(confidence, "🟡")
+                answer = v.get("answer", "")
+                caveats = v.get("caveats", [])
+                observations = v.get("observations", [])
+
+                parts = ["\n\n[Vision 分析]"]
+                parts.append(f"置信度: {badge} {confidence}")
+                parts.append(f"回答: {answer if answer else '（Vision 返回为空或格式异常）'}")
+                if caveats:
+                    parts.append(f"限制: {'; '.join(caveats[:3])}")
+                if observations:
+                    obs_lines = []
+                    obs_badges = {"high": "✓", "medium": "~", "low": "?"}
+                    for o in observations[:8]:
+                        ob = obs_badges.get(o.get("confidence", ""), "~")
+                        obs_lines.append(
+                            f"  {ob} {o.get('what', '')}: {o.get('finding', '')}"
+                        )
+                    parts.append("分项观察:\n" + "\n".join(obs_lines))
+                vision_info = "\n".join(parts)
 
             # Issue 015: 注入 Session 状态和过期警告
             if vision_session_manager is not None:

@@ -16,7 +16,8 @@
       "Bash(gortex track *)",
       "PowerShell($pwd.Path)",
       "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\\\\class-name-persistence.md\" -Confirm:$false)",
-      "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\" -Confirm:$false)"
+      "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\" -Confirm:$false)",
+      "Bash(ssh -vT git@github.com)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Administrator\\.claude\\memory"

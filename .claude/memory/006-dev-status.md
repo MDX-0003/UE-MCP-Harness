@@ -1,51 +1,58 @@
 ---
-name: dev-status-2026-06-30
-description: 2026-06-30 开发进度——截图 fallback 完成、Vision 闭环完成、009/011 待做
+name: dev-status-2026-07-07
+description: 2026-07-07 开发进度——331 tests，P0/P1 bug 基本清零，Vision 闭环完整
 metadata:
   type: project
 ---
 
-# 开发进度 2026-06-30
+# 开发进度 2026-07-07
 
-## 已完成
-| Issue | 模块 | 测试 | 备注 |
-|:---:|------|:---:|------|
-| 001 | Harness 骨架 | — | |
-| 002 | 工具发现与透传 | ✅ | |
-| 003 | 可观测性 (JSONL + stats + replay) | 23 | |
-| 004 | Context Assembly | 21 | |
-| 005 | Skill 系统 | 33 | |
-| 006 | Vision Pipeline | 24 | ✅ 三种 mode + file fallback + 进程自动发现 |
-| 007 | 验证闭环 (VisionInterceptor) | 25 | ✅ VisionInterceptor 已接入 MCP 循环，get_context 含视觉验证段落 |
-| 008 | State Cache | 18 | |
-| — | SnapshotRecorder (快照归档) | 12 | |
-| — | Streamable HTTP transport | — | |
+## 全量测试: 331 passed, 4 skipped
 
-**全量: 223 tests + L3 e2e 7/7**
+## 已完成 Issue
+
+| Issue | 模块 | 说明 |
+|:---:|------|------|
+| 001-008, 012, 015 | 骨架/透传/日志/Context/Skill/Vision/State/验证闭环/重连/Vision Session | 全部完成 |
+| PLAN_0706 | class_name 会话内补全 | 四层写入路径 + `_parse_actor_list` Bug 2 修复。见 [[plan-0706-class-name]] |
+| PLAN_0707 | Vision 统一结构化输出 | `VisionVerdict` 重构 + unified prompt + `response_format` JSON 模式 + `vision_calls.jsonl`。见 [[vision-unified-output]] |
+| Bug Fixes | P0-1/P0-2/P0-3/P1-4/P1-9/P0-8 | 全部已解决。Bug_analysis_0706.md 追踪状态 |
+| — | 灯光 SOP instructions | 光照验证前置检查 + 附近几何体注入 |
+| — | Vision 追踪 | `vision_calls.jsonl` + `instructions.md` + 自动归档 `close_active()` |
 
 ## 待做
-| Issue | 模块 | 状态 |
-|:---:|------|:---:|
-| 009 | 任务记忆 (压缩 + 注入) | ❌ 依赖 005+008 已就绪 |
-| 010 | 错误恢复 | ⬜ 跳过 |
-| 011 | 安全护栏 | ❌ 待开发 |
-| 012 | 连接健康检测 (ping + 自动重连) | ❌ 详见 docs/issues/012-connection-health.md |
+
+| 优先级 | 内容 | 说明 |
+|:---:|------|------|
+| P1 | P1-10 残留: Vision confidence=low 时 Harness 端追加警告 | `server.py` 检测 caveats 触发 |
+| P2 | P1-5 残留: tool_calls.jsonl off-by-one | `vision_calls.jsonl` 已覆盖 |
+| P2 | P2-7 截图高度偏低 (1024×321) | `vision_max_size` 加高度下限 |
+| P2 | P1-6 Session 归档统计失真 | 纯记账问题 |
+| — | Issue 011 安全护栏 | 远期 |
+| — | Issue 014 闭环验收场景 | 远期 |
 
 ## 当前 interceptor 链顺序
 ```
-DebugPreCall → ToolCallLogger → StateCache → VisionInterceptor → SnapshotRecorder
+DebugPreCall → ToolCallLogger → StateCache → DriftAlert → VisionInterceptor → SnapshotRecorder
 ```
 
 ## Vision API 配置
 - Base URL: `https://token-plan-cn.xiaomimimo.com`
 - Model: `mimo-v2.5-pro`
+- `response_format: {"type": "json_object"}` 通过 `extra_body` 启用
+- `max_tokens=4096`（新结构化格式需要更多空间）
 - Key: 通过 `.vision.env` 或 `HARNESS_VISION_API_KEY` 环境变量
+- 见 [[vision-model-config]]
 
-## 下一步
-1. Phase 1: VS Code 接入验证（30min，不改代码）
-2. Phase 3: "改成黄昏" 端到端（30min，不改代码）
-3. 009 任务记忆
-4. 011 安全护栏
+## Session 会话产物
+| 文件 | 位置 | 内容 |
+|:---|:---|:---|
+| `tool_calls.jsonl` | `{session_dir}/` | 工具调用日志（含 off-by-one verdict） |
+| `vision_calls.jsonl` | `{session_dir}/` | Vision Q&A 实时配对记录 |
+| `instructions.md` | `{session_dir}/` | LLM 收到的行为准则 |
+| `screenshots/` | `{session_dir}/` | 截图 PNG + `.verdict.json` |
+| `vision_sessions/{id}.json` | `{session_dir}/` | Vision 会话归档 |
+| `session.json` | `{session_dir}/` | 主会话元数据 |
 
-Why: 每次会话的起点——快速了解已完成什么、待做什么。
+Why: 每次会话的起点——快速了解已完成什么、待做什么。避免重做已解决的工作。
 How to apply: 对照此清单决定下一步开发优先级。

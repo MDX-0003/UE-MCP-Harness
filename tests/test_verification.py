@@ -184,31 +184,34 @@ class TestParseVerdict:
     """测试 Vision model 响应的解析。"""
 
     def test_plain_json(self) -> None:
-        raw = '{"pass": true, "reason": "光照正确", "adjustment": "无需调整"}'
+        raw = '{"answer": "光照正确", "confidence": "high", "caveats": [], "observations": [{"what": "光照", "finding": "方向光角度约为30度", "confidence": "high"}]}'
         verdict = _parse_verdict(raw)
-        assert verdict.pass_ is True
-        assert verdict.reason == "光照正确"
-        assert verdict.adjustment == "无需调整"
+        assert verdict.answer == "光照正确"
+        assert verdict.confidence == "high"
         assert verdict.need_more_info is False
+        assert len(verdict.observations) == 1
 
     def test_json_in_markdown(self) -> None:
-        raw = '```json\n{"pass": false, "reason": "太暗", "adjustment": "增加亮度"}\n```'
+        raw = '```json\n{"answer": "画面太暗", "confidence": "high", "caveats": [], "observations": [{"what": "亮度", "finding": "暗部细节丢失", "confidence": "medium"}]}\n```'
         verdict = _parse_verdict(raw)
-        assert verdict.pass_ is False
-        assert verdict.reason == "太暗"
-        assert verdict.adjustment == "增加亮度"
+        assert verdict.answer == "画面太暗"
+        assert verdict.confidence == "high"
+        assert len(verdict.observations) == 1
 
     def test_need_more_info(self) -> None:
-        raw = '{"need_more_info": true, "question": "灯光角度是多少？"}'
+        raw = '{"answer": "无法判断", "confidence": "low", "caveats": ["截图信息不足"], "observations": [], "need_more_info": true, "question": "灯光角度是多少？"}'
         verdict = _parse_verdict(raw)
         assert verdict.need_more_info is True
         assert verdict.question == "灯光角度是多少？"
+        assert verdict.confidence == "low"
 
     def test_malformed_json(self) -> None:
         raw = "这里是一些文本 pass true 然后 blah blah"
         verdict = _parse_verdict(raw)
-        # 应优雅降级而非抛异常
+        # 应优雅降级而非抛异常——全文作为 answer
         assert isinstance(verdict, VisionVerdict)
+        assert verdict.confidence == "low"
+        assert "Vision model 未返回有效 JSON" in verdict.caveats[0]
         assert verdict.raw_response == raw
 
 

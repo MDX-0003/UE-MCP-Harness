@@ -138,13 +138,17 @@ class VisionInterceptor(ToolCallInterceptor):
                 )
 
             self._cache.last_vision_verdict = {
-                "pass": verdict.pass_,
-                "reason": verdict.reason,
-                "adjustment": verdict.adjustment,
+                "answer": verdict.answer,
+                "confidence": verdict.confidence,
+                "caveats": verdict.caveats,
+                "observations": verdict.observations,
                 "at": datetime.now(timezone.utc).isoformat(),
             }
-            status = "✅ PASS" if verdict.pass_ else "❌ FAIL"
-            logger.info("Vision 分析完成: %s — %s", status, verdict.reason[:120])
+            badges = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+            logger.info("Vision 分析完成: %s confidence=%s — %s",
+                        badges.get(verdict.confidence, "🟡"),
+                        verdict.confidence,
+                        verdict.answer[:120])
 
         except Exception as e:
             logger.error("Vision 分析异常（不阻断主流程）: %s", e)

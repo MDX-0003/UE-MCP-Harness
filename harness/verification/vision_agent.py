@@ -23,59 +23,59 @@ from harness.config import Config
 
 logger = logging.getLogger("harness.verification.vision_agent")
 
-# Vision Sub-Agent 的系统 prompt — 针对性提问模式（有 question 时，优先使用）
-VISION_SYSTEM_PROMPT_QUESTION = """你是一个 Unreal Engine 编辑器截图分析器。
-你会收到编辑器截图和一个具体问题。请针对问题直接回答，基于截图中可见的内容。
+# Vision Sub-Agent 的系统 prompt — 统一结构化输出
+VISION_SYSTEM_PROMPT = """你是一个 Unreal Engine 编辑器截图分析器。
+分析截图内容，基于可见事实回答。判断灯光看被照亮表面，不看 gizmo 线框。
+如实报告，不迎合提问者。"""
 
-回答要求：
-- 直接、准确、基于截图可见内容
-- 如果截图无法回答该问题，明确说明"从截图中无法判断"并解释原因
-- 如果需要更多信息才能回答，说明需要什么
-- 如果问题涉及与场景上下文的比对（如"某 Actor 是否在预期位置"），请明确比对结果
-- 回答中可以引用场景上下文中提供的 Actor 名称和属性
-
-不需要 JSON 格式，直接回答即可。"""
-
-# Vision Sub-Agent 的系统 prompt — 自由描述模式（无预期描述时）
-VISION_SYSTEM_PROMPT_DESCRIBE = """你是一个 Unreal Engine 编辑器截图分析器。
-你会收到编辑器截图，请用中文描述截图中的场景内容。关注：
-- 场景中有什么物体/Actor（灯光、模型、地形等）
-- 光照情况（方向、色温、亮度、阴影）
-- 相机角度和视口内容
-- 整体氛围和风格
-直接描述即可，不需要 JSON 格式。"""
-
-# Vision Sub-Agent 的系统 prompt — 验证模式（有预期描述时）
-VISION_SYSTEM_PROMPT_VERIFY = """你是一个 Unreal Engine 视觉质量验证器。
-你会收到编辑器截图和预期场景描述，你的任务是判断截图是否符合描述。
-
-返回 JSON 格式（不要包含其他内容）：
-{
-  "pass": true或false,
-  "reason": "具体的判断原因（中文）",
-  "adjustment": "如果不通过，建议如何调整；如果通过，写 '无需调整'"
-}
-
-如果信息不足以做出判断，可以追问：
-{
-  "need_more_info": true,
-  "question": "需要补充的信息"
-}
-
-判断标准：
-- 关注：光照方向/角度、色温、亮度、阴影长度、天空颜色、整体氛围
-"""
+# 追加到每条 user message 末尾的 JSON schema 定义
+# response_format 参数已强制 JSON 模式，此处只需定义字段语义
+_VISION_FORMAT_REMINDER = """
+返回格式：
+{"answer":"...","confidence":"high|medium|low","caveats":["..."],"observations":[{"what":"...","finding":"...","confidence":"high|medium|low"}],"need_more_info":false,"question":""}
+- answer: 你的核心回答。收到验证性提问时请明确给出"符合预期"或"不符合预期"的结论
+- confidence: high/medium/low
+- caveats: 你识别的限制条件（如"2D截图无法判断深度"），无则 []
+- observations: 分维度观察，至少 1 项
+- need_more_info: 信息不足需追问时设 true，填写 question"""
 
 
 @dataclass
 class VisionVerdict:
-    """Vision Sub-Agent 的返回结果。"""
-    pass_: bool
-    reason: str
-    adjustment: str
+    """Vision Sub-Agent 的统一结构化返回。
+
+    answer:       自然语言回答。
+    confidence:   "high" / "medium" / "low" — Vision 对自己回答的置信度。
+    caveats:      Vision 主动标注的限制条件。
+    observations: 分维度观察列表，每项带独立置信度。
+    need_more_info: 是否需要补充信息。
+    question:     追问文本（仅在 need_more_info 为 true 时有值）。
+    raw_response: 原始 API 响应，用于 debug。
+    """
+    answer: str
+    confidence: str = "medium"
+    caveats: list[str] = field(default_factory=list)
+    observations: list[dict] = field(default_factory=list)
     need_more_info: bool = False
     question: str = ""
-    raw_response: str = ""  # 原始 API 响应，用于 debug
+    raw_response: str = ""
+
+    # ---- 向后兼容属性（旧代码可能引用） ----
+
+    @property
+    def pass_(self) -> bool | None:
+        """已废弃。始终返回 None——Vision 不再做二元判定。"""
+        return None
+
+    @property
+    def reason(self) -> str:
+        """已废弃。请用 answer。"""
+        return self.answer
+
+    @property
+    def adjustment(self) -> str:
+        """已废弃。请用 caveats。"""
+        return "; ".join(self.caveats) if self.caveats else ""
 
 
 @dataclass
@@ -98,46 +98,38 @@ class VisionSubAgent:
         question: str = "",
         scene_context: str = "",
     ) -> VisionVerdict:
-        """发送截图给 Vision model，返回结构化判断。
+        """发送截图给 Vision model，返回统一结构化判断。
 
         Args:
             image_b64: base64 编码的 PNG 截图。
             expected: 预期场景描述。None 或空字符串时走自由描述模式。
-            tolerance: 容忍度阈值（0-1），仅在验证模式下使用。
+            tolerance: 容忍度阈值（0-1）。
             extra_context: 额外上下文（如追问回答）。
-            question: 针对性提问。有值时走提问模式（优先级高于 expected）。
+            question: 针对性提问。有值时优先级高于 expected。
             scene_context: 场景上下文（从 WorldState 构建），注入 user message 供 Vision 参照。
 
         Returns:
-            VisionVerdict 结构化判断结果。
+            VisionVerdict 统一结构化判断结果。
         """
         self._call_count += 1
 
-        # 三层优先级：question > expected > describe
+        # 统一组装 user message（不再区分验证/提问/描述模式）
+        parts: list[str] = []
         if question:
-            # 针对性提问模式 — 自由文本回答
-            user_message = f"问题：{question}"
-            if scene_context:
-                user_message += f"\n\n{scene_context}"
-            is_verify = False
+            parts.append(f"问题：{question}")
         elif expected and expected != "描述截图内容":
-            # 验证模式 — JSON pass/fail
-            user_message = f"预期场景：{expected}\n容忍度：{tolerance}"
-            if scene_context:
-                user_message += f"\n\n{scene_context}"
-            is_verify = True
+            parts.append(f"预期场景：{expected}")
+            parts.append(f"容忍度：{tolerance}")
         else:
-            # 自由描述模式
-            user_message = "请描述这张截图中的场景内容。"
-            if scene_context:
-                user_message += (
-                    f"\n\n{scene_context}\n\n"
-                    "请结合以上场景上下文描述截图内容，注意比对预期与实际的差异。"
-                )
-            is_verify = False
+            parts.append("请描述这张截图中的场景内容。")
+        if scene_context:
+            parts.append(f"场景上下文：\n{scene_context}")
+        user_message = "\n\n".join(parts)
 
         if extra_context:
             user_message += f"\n补充信息：{extra_context}"
+        # 在 user message 末尾追加格式硬约束（带图片时比 system prompt 更有效）
+        user_message += _VISION_FORMAT_REMINDER
 
         # 构建消息（含历史）
         messages = list(self._history)
@@ -157,22 +149,20 @@ class VisionSubAgent:
         })
 
         try:
-            response = await _call_vision_api(
-                self.config, messages, verify_mode=is_verify, question=question,
-            )
+            response = await _call_vision_api(self.config, messages)
 
             # 保存历史
             self._history.append(messages[-1])
             self._history.append({"role": "assistant", "content": response})
 
-            return _parse_verdict(response, verify_mode=is_verify)
+            return _parse_verdict(response)
 
         except Exception as e:
             logger.error("Vision API 调用失败: %s", e)
             return VisionVerdict(
-                pass_=False,
-                reason=f"Vision API 调用失败: {e}",
-                adjustment="请检查 Vision API key 和网络连接后重试",
+                answer=f"Vision API 调用失败: {e}",
+                confidence="low",
+                caveats=["请检查 Vision API key 和网络连接后重试"],
             )
 
     async def continue_with_info(self, info: str) -> VisionVerdict:
@@ -189,15 +179,15 @@ class VisionSubAgent:
 
         messages = list(self._history)
         try:
-            response = await _call_vision_api(self.config, messages, verify_mode=True)
+            response = await _call_vision_api(self.config, messages)
             self._history.append({"role": "assistant", "content": response})
-            return _parse_verdict(response, verify_mode=True)
+            return _parse_verdict(response)
         except Exception as e:
             logger.error("Vision API 继续判断失败: %s", e)
             return VisionVerdict(
-                pass_=False,
-                reason=f"Vision API 调用失败: {e}",
-                adjustment="请重试",
+                answer=f"Vision API 调用失败: {e}",
+                confidence="low",
+                caveats=["请重试"],
             )
 
     async def continue_with_question(
@@ -215,6 +205,7 @@ class VisionSubAgent:
         user_message = f"追问：{question}"
         if scene_context:
             user_message += f"\n\n{scene_context}"
+        user_message += _VISION_FORMAT_REMINDER
 
         self._history.append({
             "role": "user",
@@ -223,17 +214,15 @@ class VisionSubAgent:
 
         messages = list(self._history)
         try:
-            response = await _call_vision_api(
-                self.config, messages, verify_mode=False, question=question,
-            )
+            response = await _call_vision_api(self.config, messages)
             self._history.append({"role": "assistant", "content": response})
-            return _parse_verdict(response, verify_mode=False)
+            return _parse_verdict(response)
         except Exception as e:
             logger.error("Vision API 追问失败: %s", e)
             return VisionVerdict(
-                pass_=False,
-                reason=f"Vision API 调用失败: {e}",
-                adjustment="请重试",
+                answer=f"Vision API 调用失败: {e}",
+                confidence="low",
+                caveats=["请重试"],
             )
 
     def reset(self) -> None:
@@ -253,25 +242,22 @@ class VisionSubAgent:
 async def _call_vision_api(
     config: Config,
     messages: list[dict],
-    verify_mode: bool = True,
-    question: str = "",
 ) -> str:
     """调用 Anthropic Claude Vision API。
 
     Args:
         config: Harness 配置。
         messages: 消息历史。
-        verify_mode: True=验证模式（返回 JSON），False=描述/提问模式（返回自然语言）。
-    question: 针对性提问文本。有值时使用 VISION_SYSTEM_PROMPT_QUESTION。
 
     如果未安装 anthropic SDK 或无 API key，返回 mock 响应用于测试。
     """
     if not config.vision_api_key or config.vision_api_key == "test-key":
         logger.debug("Vision API key 缺失或为测试 key，返回 mock 结果")
         return json.dumps({
-            "pass": True,
-            "reason": "[MOCK] Vision API 未配置，默认通过",
-            "adjustment": "请配置 HARNESS_VISION_API_KEY 环境变量进行真实验证",
+            "answer": "[MOCK] Vision API 未配置——截图内容应正常显示",
+            "confidence": "low",
+            "caveats": ["Vision API key 未配置，使用 mock 响应"],
+            "observations": [{"what": "mock", "finding": "mock response", "confidence": "low"}],
         })
 
     try:
@@ -279,9 +265,10 @@ async def _call_vision_api(
     except ImportError:
         logger.warning("anthropic SDK 未安装，返回 mock 结果")
         return json.dumps({
-            "pass": True,
-            "reason": "[MOCK] anthropic SDK 未安装，默认通过",
-            "adjustment": "pip install anthropic 启用真实 Vision 验证",
+            "answer": "[MOCK] anthropic SDK 未安装——截图内容应正常显示",
+            "confidence": "low",
+            "caveats": ["anthropic SDK 未安装，使用 mock 响应"],
+            "observations": [{"what": "mock", "finding": "mock response", "confidence": "low"}],
         })
 
     client = anthropic.Anthropic(
@@ -289,13 +276,8 @@ async def _call_vision_api(
         base_url=config.vision_api_base_url,
     )
 
-    # 根据模式选择 system prompt
-    if verify_mode:
-        system = VISION_SYSTEM_PROMPT_VERIFY
-    elif question:
-        system = VISION_SYSTEM_PROMPT_QUESTION
-    else:
-        system = VISION_SYSTEM_PROMPT_DESCRIBE
+    # 统一 system prompt
+    system = VISION_SYSTEM_PROMPT
     anthropic_messages = []
     for msg in messages:
         role = msg["role"]
@@ -323,9 +305,10 @@ async def _call_vision_api(
     response = await asyncio.to_thread(
         client.messages.create,
         model=config.vision_model,
-        max_tokens=1024,
+        max_tokens=4096,  # 新结构化格式(observations+中文)需要更多空间，2048 已验证不够
         system=system,
         messages=anthropic_messages,
+        extra_body={"response_format": {"type": "json_object"}},
     )
 
     # 提取文本——跳过 thinking block（extended thinking 产物，非正文）
@@ -353,12 +336,22 @@ async def _call_vision_api(
 
     text = text.strip()
 
+    # 检测截断：max_tokens 耗尽时 JSON 不完整，后续 _parse_verdict 会失败
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason == "max_tokens":
+        logger.warning(
+            "Vision 响应可能被截断 (stop_reason=max_tokens, text_len=%d)。"
+            "如后续解析失败，考虑进一步增加 max_tokens。",
+            len(text),
+        )
+
     logger.info(
-        "Vision API 调用完成 — model=%s, tokens_in=%d, tokens_out=%d, text_len=%d",
+        "Vision API 调用完成 — model=%s, tokens_in=%d, tokens_out=%d, text_len=%d, stop_reason=%s",
         config.vision_model,
         response.usage.input_tokens if hasattr(response, 'usage') else 0,
         response.usage.output_tokens if hasattr(response, 'usage') else 0,
         len(text),
+        stop_reason,
     )
     # debug 日志输出前 500 字符，方便排查解析问题
     logger.debug("Vision 原始响应前 500 字符: %s", text[:500])
@@ -366,58 +359,69 @@ async def _call_vision_api(
     return text
 
 
-def _parse_verdict(raw: str, verify_mode: bool = True) -> VisionVerdict:
-    """从 Vision model 返回的文本中解析结构化判断。
+def _parse_verdict(raw: str) -> VisionVerdict:
+    """从 Vision model 返回的文本中解析统一结构化 JSON。
 
-    验证模式（verify_mode=True）：期望 JSON 格式的 pass/fail 判断。
-    描述模式（verify_mode=False）：将整个返回文本作为 reason，不要求 JSON。
+    所有模式（验证/提问/描述）统一走 JSON 解析路径。
+    解析失败时以全文作为 answer、confidence=low。
     """
-    # 描述模式：全文即结果
-    if not verify_mode:
-        if not raw or not raw.strip():
-            return VisionVerdict(
-                pass_=True,
-                reason="(Vision model 返回为空)",
-                adjustment="",
-                raw_response=raw,
-            )
+    if not raw or not raw.strip():
         return VisionVerdict(
-            pass_=True,
-            reason=raw.strip(),
-            adjustment="",
+            answer="(Vision model 返回为空)",
+            confidence="low",
+            caveats=["Vision API 返回了空响应"],
             raw_response=raw,
         )
 
-    # ---- 验证模式：尝试解析 JSON ----
     # 尝试提取 JSON 代码块
     json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', raw, re.DOTALL)
     if json_match:
         json_str = json_match.group(1)
     else:
-        # 尝试找到 JSON 对象
-        json_match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(0)
-        else:
-            json_str = raw
+        # 尝试找到 JSON 对象（支持嵌套花括号的平衡匹配）
+        json_str = _extract_json_object(raw)
 
     try:
         data = json.loads(json_str)
-    except json.JSONDecodeError:
-        # 解析失败，返回原始文本帮助排查
+    except (json.JSONDecodeError, ValueError):
+        # 解析失败：全文作为 answer，confidence=low
         return VisionVerdict(
-            pass_=False,
-            reason=f"Vision model 未返回有效 JSON。原始响应: {raw[:500]}",
-            adjustment="请检查 Vision model 配置和 prompt 模板",
+            answer=raw[:1000],
+            confidence="low",
+            caveats=["Vision model 未返回有效 JSON——以下为原始回答"],
             raw_response=raw,
         )
 
-    need_more = data.get("need_more_info", False)
+    # 标准化 confidence 值
+    confidence = data.get("confidence", "medium")
+    if confidence not in ("high", "medium", "low"):
+        confidence = "medium"
+
     return VisionVerdict(
-        pass_=data.get("pass", not need_more),
-        reason=data.get("reason", ""),
-        adjustment=data.get("adjustment", ""),
-        need_more_info=need_more,
+        answer=data.get("answer", ""),
+        confidence=confidence,
+        caveats=data.get("caveats", []),
+        observations=data.get("observations", []),
+        need_more_info=data.get("need_more_info", False),
         question=data.get("question", ""),
         raw_response=raw,
     )
+
+
+def _extract_json_object(text: str) -> str:
+    """从文本中提取最外层的 JSON 对象（支持嵌套花括号）。"""
+    # 找到第一个 {
+    start = text.find("{")
+    if start == -1:
+        return text
+    # 平衡匹配花括号
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    # 未闭合，返回从 start 到末尾
+    return text[start:]
