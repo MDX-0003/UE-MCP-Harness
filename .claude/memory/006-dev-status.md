@@ -20,16 +20,16 @@ metadata:
 | — | 灯光 SOP instructions | 光照验证前置检查 + 附近几何体注入 |
 | — | Vision 追踪 | `vision_calls.jsonl` + `instructions.md` + 自动归档 `close_active()` |
 
-## 待做
+## 待做（2026-07-07 重排：重心转 Issue 016）
 
 | 优先级 | 内容 | 说明 |
 |:---:|------|------|
+| **P0** | Issue 016 Part A: ReadbackInterceptor (L2 读回) | 写后自动读回 diff。理由：PLAN_0707 后 Vision 不做二元判定，L1 记录的是写入意图非事实，系统里没有任何机制回答"写入是否生效"。~1 天 |
+| **P0** | Issue 016 Part B: 参考图对比 | Vision 双图 + 结构化 differences + 主 LLM 拆步骤。形态细节 grill 确认中 |
 | P1 | P1-10 残留: Vision confidence=low 时 Harness 端追加警告 | `server.py` 检测 caveats 触发 |
-| P2 | P1-5 残留: tool_calls.jsonl off-by-one | `vision_calls.jsonl` 已覆盖 |
-| P2 | P2-7 截图高度偏低 (1024×321) | `vision_max_size` 加高度下限 |
-| P2 | P1-6 Session 归档统计失真 | 纯记账问题 |
+| P2 | P1-5 off-by-one / P2-7 截图高度 / P1-6 归档统计 | 小尾巴，顺手清 |
 | — | Issue 011 安全护栏 | 远期 |
-| — | Issue 014 闭环验收场景 | 远期 |
+| 放弃 | Issue 014 闭环验收场景 demo | 2026-07-07 降级：demo 是素材非机制；指纹 Hard Boundary 已完成，L2 读回移入 016。将来若录 demo，基准=有/无 Harness 对照 |
 
 ## 当前 interceptor 链顺序
 ```

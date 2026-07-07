@@ -1,5 +1,12 @@
 # 014 — 闭环验收场景：30 步任务 + 中途 Harness 外干预
 
+> **状态（2026-07-07）：降级，不再是当前里程碑。**
+> 原因：项目重心转向参考图机制（Issue 016）——demo 的价值是叙事素材而非机制，参考图闭环跑通本身就是更好的展示。本 Issue 的两项前置开发结局：
+> - 前置 #1（指纹 Hard Boundary + dirty-diff + 漂移警告）：**已完成**，落地在 `harness/cli.py`（连接/重连）与 `harness/server.py`（Hard Boundary 触发）。
+> - 前置 #2（L2 读回验证）：**移入 Issue 016 Part A**（ReadbackInterceptor）。
+>
+> 若将来录制 demo，数字对比基准定为**有/无 Harness 对照**：同一任务分别用 Claude Code 直连 UE MCP（:8000）与经 Harness（:9000）各跑一遍，对比 token 消耗、工具调用数、任务成功率。
+
 **类型：** 需要人工配合（中途手动干预步骤由人执行）
 
 ## 要构建什么

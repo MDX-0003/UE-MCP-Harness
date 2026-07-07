@@ -2,7 +2,7 @@
 
 MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外是 MCP Server（LLM 连接入口），对内是 MCP Client（连接 UE MCP Server）。提供上下文组装、状态缓存（带指纹校验的观测记录）、验证闭环（L2 读回 + Vision）、轨迹记忆、安全护栏。
 
-## 当前状态 (2026-07-02)
+## 当前状态 (2026-07-07)
 
 | Issue | 模块 | 状态 |
 |:---:|------|:---:|
@@ -19,12 +19,14 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 | 011 | 安全护栏 | ❌ 待开发 |
 | 012 | 连接健康检测 (ping + 自动重连) | ✅ 23 tests | 详见 docs/HANDOFF_0701_ISSUE_012_CONNECTION_HEALTH.md |
 | 013 | State Cache 磁盘持久化 | ⬜ 作废 (ADR 0008 信任模型倒转，文件已删) |
-| 014 | 闭环验收场景 (指纹 Hard Boundary + L2 读回 + demo) | ❌ **当前里程碑** | 详见 docs/issues/014-e2e-acceptance-scenario.md |
+| 014 | 闭环验收场景 demo | ⬜ 降级 (2026-07-07)：demo 是叙事素材非机制；指纹 Hard Boundary 已落地，L2 读回移入 016 | 详见 docs/issues/014-e2e-acceptance-scenario.md 头部降级说明 |
+| 015 | Vision 定向提问 (Session 化 vision_ask) | ✅ | 详见 docs/issues/015-vision-targeted-questioning.md |
+| 016 | L2 读回拦截器 + 参考图对比 | ❌ **当前里程碑** | 详见 docs/issues/016-readback-and-reference-image.md |
 | — | LevelPersistenceToolset (fingerprint/dirty/save 五工具) | ✅ 直连验证通过 | UE 侧插件, `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset/`, 详见 docs/contracts.md §4 |
 
-**全量测试：252 unit tests (233→252) + L3 e2e 7/7 passed**
+**全量测试：331 passed + 4 skipped（2026-07-07）**
 
-**当前方向（2026-07-02 评审定案）**：项目第一定位是求职/作品集叙事。UE 是世界状态唯一权威，WorldState 降级为带指纹校验的观测记录（ADR 0008）；下一里程碑是 Issue 014 闭环验收场景。UE 侧配套插件 LevelPersistenceToolset（fingerprint/dirty/save 五工具）位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset`，已直连验证通过。
+**当前方向（2026-07-07 更新）**：项目第一定位是求职/作品集叙事，重心转向参考图机制——用参考图让 Vision 回答“参考图与现状的区别”，由主 LLM 拆解为可执行步骤，替代口头表述的不确定性（Issue 016 Part B）。其前置是 L2 读回验证（ReadbackInterceptor，写后自动读回 diff，ADR 0008 定义的正确性主通道，Issue 016 Part A）。原 Issue 014 demo 降级为素材性工作，若将来录制，数字对比基准为有/无 Harness 对照。UE 是世界状态唯一权威，WorldState 为带指纹校验的观测记录（ADR 0008）。UE 侧配套插件 LevelPersistenceToolset（fingerprint/dirty/save 五工具）位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset`，已直连验证通过。
 
 ## 架构
 
