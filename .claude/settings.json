@@ -17,7 +17,8 @@
       "PowerShell($pwd.Path)",
       "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\\\\class-name-persistence.md\" -Confirm:$false)",
       "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\" -Confirm:$false)",
-      "Bash(ssh -vT git@github.com)"
+      "Bash(ssh -vT git@github.com)",
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\Administrator\\.claude\\memory"

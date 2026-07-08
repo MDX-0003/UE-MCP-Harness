@@ -819,3 +819,125 @@ class TestReadbackInterceptor:
         await interceptor.post_call(event)
 
         mock_ue_client.call_tool.assert_not_called()
+
+    async def test_returnvalue_wrapper_format(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """ToolsetRegistry 的 returnValue 包装格式能被正确解包。"""
+        # UE 实机中 get_properties 返回值格式:
+        # {"content": [{"type": "text", "text": "{\"returnValue\":\"{\\\"intensity\\\":2}\"}"}]}
+        inner_value = json.dumps({"intensity": 2, "LightColor": "(1,0,0)"})
+        wrapper = json.dumps({"returnValue": inner_value})
+        mock_ue_client.call_tool.return_value = json.dumps({
+            "content": [{"type": "text", "text": wrapper}],
+        })
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.object.ObjectTools.set_properties",
+            {
+                "instance": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.PointLight_1"
+                },
+                "values": '{"intensity": "2", "LightColor": "(1,0,0)"}',
+            },
+        )
+        await interceptor.post_call(event)
+
+        # returnValue 正确解包 → diff 通过 → 不注入徽章
+        assert event.parsed_text == "ok"
+
+    async def test_returnvalue_wrapper_mismatch(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """returnValue 格式 + 值失配 → 正确报告失配。"""
+        inner_value = json.dumps({"intensity": 5000})  # 实际被 clamp
+        wrapper = json.dumps({"returnValue": inner_value})
+        mock_ue_client.call_tool.return_value = json.dumps({
+            "content": [{"type": "text", "text": wrapper}],
+        })
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.object.ObjectTools.set_properties",
+            {
+                "instance": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.PointLight_1"
+                },
+                "values": '{"intensity": "8000"}',  # 意图 8000
+            },
+        )
+        await interceptor.post_call(event)
+
+        assert event.parsed_text is not None
+        assert "L2 读回失配" in event.parsed_text
+        assert "intensity" in event.parsed_text
+
+    async def test_nested_dict_subset_comparison(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """嵌套 dict: 只比对 intent 中的 key，readback 返回的额外字段不触发告警。"""
+        full_settings = {
+            "ColorContrast": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.0},
+            "VignetteIntensity": 0.9,
+            "BloomIntensity": 0.8,  # readback 额外字段
+        }
+        inner_value = json.dumps({"settings": full_settings})
+        wrapper = json.dumps({"returnValue": inner_value})
+        mock_ue_client.call_tool.return_value = json.dumps({
+            "content": [{"type": "text", "text": wrapper}],
+        })
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.object.ObjectTools.set_properties",
+            {
+                "instance": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.PostProcessVolume_0"
+                },
+                "values": json.dumps({
+                    "settings": {
+                        "ColorContrast": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.0},
+                        "VignetteIntensity": 0.9,
+                    },
+                }),
+            },
+        )
+        await interceptor.post_call(event)
+
+        assert event.parsed_text == "ok"
+
+    async def test_nested_dict_partial_mismatch(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """嵌套 dict: 部分值不匹配 → 正确报告。"""
+        full_settings = {
+            "ColorContrast": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 0.0},
+            "VignetteIntensity": 0.9,
+        }
+        inner_value = json.dumps({"settings": full_settings})
+        wrapper = json.dumps({"returnValue": inner_value})
+        mock_ue_client.call_tool.return_value = json.dumps({
+            "content": [{"type": "text", "text": wrapper}],
+        })
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.object.ObjectTools.set_properties",
+            {
+                "instance": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.PostProcessVolume_0"
+                },
+                "values": json.dumps({
+                    "settings": {
+                        "ColorContrast": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.0},
+                        "VignetteIntensity": 0.9,
+                    },
+                }),
+            },
+        )
+        await interceptor.post_call(event)
+
+        assert event.parsed_text is not None
+        assert "L2 读回失配" in event.parsed_text
+        assert "settings.ColorContrast" in event.parsed_text

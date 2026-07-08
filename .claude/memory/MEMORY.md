@@ -8,3 +8,5 @@
 - [Level Persistence Toolset](level-persistence-toolset.md) — UE 侧插件：关卡保存/指纹/脏包查询五工具
 - [Vision Model Config](vision-model-config.md) — MiMo mimo-v2.5-pro、response_format、max_tokens=4096、prompt 策略
 - [PLAN 0706 & 0707 Summary](plan-0706-0707-summary.md) — class_name 补全 + Vision 统一输出的设计决策和不要做的事
+- [L2 Readback Mechanism](l2-readback-mechanism.md) — L2 读回伪代码原理、白名单、双层解包、拦截器链位置
+- [L2 Readback returnValue Bug](l2-readback-returnvalue-bug.md) — returnValue 双层包装格式未被解析导致误报；修复方案与前后对比

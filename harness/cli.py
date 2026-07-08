@@ -217,9 +217,9 @@ def cmd_start(args: argparse.Namespace) -> int:
 
             interceptors: list[ToolCallInterceptor] = [
                 DebugPreCallInterceptor(),
+                ReadbackInterceptor(ue_client, _cache),   # 016: L2 读回验证（injects badge before logger）
                 tool_logger,
                 cache_interceptor,
-                ReadbackInterceptor(ue_client, _cache),   # 016: L2 读回验证
                 DriftAlertInterceptor(_cache),   # 漂移时注入警告到 tool call 返回值
                 vision_interceptor,
                 snapshot_recorder,

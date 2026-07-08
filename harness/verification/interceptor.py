@@ -202,7 +202,9 @@ class ReadbackInterceptor(ToolCallInterceptor):
         """
         if event.error is not None:
             return
-
+    
+        # event.name = "toolset_registry.toolsets.core.object.ObjectTools.set_properties"
+        # short = "set_properties"
         short = extract_short_name(event.name)
         readback_short = _READBACK_MAP.get(short)
         if readback_short is None:
@@ -215,7 +217,8 @@ class ReadbackInterceptor(ToolCallInterceptor):
 
         # 构建读回工具的全限定名（替换短名）
         readback_full = event.name.replace(short, readback_short)
-
+        
+        #尝试构造RPC请求，直接向ue发送查询call_tool
         try:
             readback_args = _build_readback_args(short, nc, event.args)
             if readback_args is None:
@@ -282,7 +285,9 @@ def _parse_readback_result(short: str, result_text: str) -> dict | list:
     """解析 ue_client.call_tool 返回的原始结果，提取实际值。
 
     result_text 是 JSON-RPC result 的 JSON 字符串。
-    需要先解外层（MCP content wrapper），再解内层（工具返回值）。
+    解包两层：
+      1. MCP content wrapper: {"content": [{"type": "text", "text": "..."}]}
+      2. ToolsetRegistry returnValue wrapper: {"returnValue": "<json>"}
     """
     try:
         raw = json.loads(result_text) if isinstance(result_text, str) else result_text
@@ -290,54 +295,100 @@ def _parse_readback_result(short: str, result_text: str) -> dict | list:
         logger.debug("L2 读回结果解析失败（非 JSON）: %.200s", str(result_text))
         return {}
 
-    # 提取 MCP content[0].text
-    text: str | None = None
+    # 提取内层文本（MCP content[0].text 或 raw 本身）
+    text = _unwrap_mcp_text(raw)
+
+    # 按工具类型解析内层值
+    if short == "set_actor_transform":
+        return _parse_transform_readback(raw, text)
+
+    if short == "set_properties":
+        return _parse_properties_readback(text)
+
+    return {}
+
+
+def _unwrap_mcp_text(raw: dict) -> str:
+    """从 MCP 响应中提取 text 内容。
+
+    支持两种格式：
+      - MCP content array: {"content": [{"type": "text", "text": "..."}]}
+      - 直接 text 字符串
+    """
     if isinstance(raw, dict):
         content = raw.get("content", [])
         if isinstance(content, list):
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text":
-                    text = item.get("text", "")
-                    break
-    if text is None:
-        text = str(raw)
-
-    # 按工具类型解析内层值
-    if short == "set_actor_transform":
-        # get_actor_transform 返回 Transform 对象，MCP 序列化为 JSON 对象
-        # 可能直接在 raw 中，也可能在 text 中
-        return _extract_transform_value(raw)
-
-    if short == "set_properties":
-        # get_properties 返回 JSON 字符串
-        try:
-            parsed = json.loads(text)
-            return parsed if isinstance(parsed, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            return {}
-
-    return {}
+                    return item.get("text", "")
+    return str(raw)
 
 
-def _extract_transform_value(raw: dict) -> dict:
-    """从 MCP 响应中提取 Transform 数据。"""
-    # 优先从 content[0].text 提取
-    content = raw.get("content", [])
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                text = item.get("text", "")
-                if text:
-                    try:
-                        parsed = json.loads(text)
-                        if isinstance(parsed, dict):
-                            return parsed
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-    # Fallback: 如果 raw 本身就是 Transform-like dict
+def _unwrap_return_value(text: str) -> dict | None:
+    """尝试解包 ToolsetRegistry 的 returnValue 包装。
+
+    格式: {"returnValue": "<json_string>"}
+    返回内层 JSON dict，或 None 表示不是 returnValue 格式。
+    """
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(parsed, dict) and "returnValue" in parsed:
+        rv = parsed["returnValue"]
+        if isinstance(rv, str):
+            try:
+                inner = json.loads(rv)
+                return inner if isinstance(inner, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                return None
+        if isinstance(rv, dict):
+            return rv
+    return None
+
+
+def _parse_transform_readback(raw: dict, text: str) -> dict:
+    """解析 get_actor_transform 的返回值。
+
+    优先从 returnValue 解包，其次从 MCP content text 直接解析，
+    最后检查 raw 本身是否是 Transform-like dict。
+    """
+    # 尝试 returnValue 解包
+    rv = _unwrap_return_value(text)
+    if rv is not None:
+        return rv
+
+    # 尝试从 text 直接解析为 Transform JSON
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict) and ("translation" in parsed or "rotation" in parsed):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Fallback: raw 本身是 Transform-like dict
     if isinstance(raw, dict) and ("translation" in raw or "rotation" in raw):
         return raw
+
     return {}
+
+
+def _parse_properties_readback(text: str) -> dict:
+    """解析 get_properties 的返回值。
+
+    优先从 returnValue 解包，其次直接从 text 解析 JSON。
+    """
+    rv = _unwrap_return_value(text)
+    if rv is not None:
+        return rv
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 def _diff_values(
@@ -386,24 +437,39 @@ def _diff_transform(intent: dict, actual: dict, epsilon: float) -> list[str]:
 
 
 def _diff_properties(intent: dict, actual: dict) -> list[str]:
-    """按属性名逐一比较。"""
+    """按属性名逐一比较。嵌套 dict 递归只比对 intent 中的 key。"""
     mismatches: list[str] = []
     for key, intent_val in intent.items():
-        actual_val = actual.get(key)
-        if actual_val is None and key not in actual:
+        if key not in actual:
             mismatches.append(f"{key} 读回结果中缺失")
             continue
-        # 尝试数值比较
-        try:
-            if abs(float(intent_val) - float(actual_val)) > 1e-6:
-                mismatches.append(f"{key} 意图={intent_val} 实际={actual_val}")
+        actual_val = actual[key]
+        # 嵌套 dict: 递归比较子集
+        if isinstance(intent_val, dict) and isinstance(actual_val, dict):
+            for sub_key, sub_intent in intent_val.items():
+                if sub_key not in actual_val:
+                    mismatches.append(f"{key}.{sub_key} 读回结果中缺失")
+                    continue
+                sub_actual = actual_val[sub_key]
+                if not _values_equal(sub_intent, sub_actual):
+                    mismatches.append(
+                        f"{key}.{sub_key} 意图={sub_intent} 实际={sub_actual}"
+                    )
             continue
-        except (ValueError, TypeError):
-            pass
-        # 字符串/其他直接比较
-        if str(intent_val) != str(actual_val):
+        if not _values_equal(intent_val, actual_val):
             mismatches.append(f"{key} 意图={intent_val} 实际={actual_val}")
     return mismatches
+
+
+def _values_equal(intent_val: object, actual_val: object) -> bool:
+    """比较两个值是否等价（数值容差 1e-6，字符串精确）。"""
+    try:
+        if abs(float(intent_val) - float(actual_val)) <= 1e-6:
+            return True
+        return False
+    except (ValueError, TypeError):
+        pass
+    return str(intent_val) == str(actual_val)
 
 
 def _confirm_cache(
