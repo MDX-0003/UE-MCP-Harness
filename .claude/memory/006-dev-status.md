@@ -25,7 +25,7 @@ metadata:
 | 优先级 | 内容 | 说明 |
 |:---:|------|------|
 | **P0** | Issue 016 Part A: ReadbackInterceptor (L2 读回) | 写后自动读回 diff。理由：PLAN_0707 后 Vision 不做二元判定，L1 记录的是写入意图非事实，系统里没有任何机制回答"写入是否生效"。~1 天 |
-| **P0** | Issue 016 Part B: 参考图对比 | Vision 双图 + 结构化 differences + 主 LLM 拆步骤。形态细节 grill 确认中 |
+| **P0** | Issue 016 Part B: 参考图匹配（已重新设计） | 3 新工具 + Skill 重构 + Instructions 分离。详见 [[reference-image-design-0708]] 和 `docs/PLAN_0708_reference_image_design.md` |
 | P1 | P1-10 残留: Vision confidence=low 时 Harness 端追加警告 | `server.py` 检测 caveats 触发 |
 | P2 | P1-5 off-by-one / P2-7 截图高度 / P1-6 归档统计 | 小尾巴，顺手清 |
 | — | Issue 011 安全护栏 | 远期 |

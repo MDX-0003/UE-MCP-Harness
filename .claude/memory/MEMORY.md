@@ -10,3 +10,4 @@
 - [PLAN 0706 & 0707 Summary](plan-0706-0707-summary.md) — class_name 补全 + Vision 统一输出的设计决策和不要做的事
 - [L2 Readback Mechanism](l2-readback-mechanism.md) — L2 读回伪代码原理、白名单、双层解包、拦截器链位置
 - [L2 Readback returnValue Bug](l2-readback-returnvalue-bug.md) — returnValue 双层包装格式未被解析导致误报；修复方案与前后对比
+- [Reference Image Design 0708](reference-image-design-0708.md) — Issue 016 Part B 重新设计：3 工具 + Skill 重构 + Instructions 分离
