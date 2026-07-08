@@ -1,17 +1,18 @@
-"""Vision Interceptor — 截图工具调用后自动触发 Vision 分析 (Issue 007)
+"""Verification Interceptors — L2 读回 + Vision 分析 (Issue 007, 016)
 
-ToolCallInterceptor 的 post_call 实现：
-  当 LLM 调用截图工具（CaptureEditorImage / Screenshot 等）成功后，
-  自动从返回结果提取 base64 图像数据，调用 VisionSubAgent 进行视觉验证，
+ReadbackInterceptor (Issue 016 Part A):
+  写工具调用后自动读回实际值，与意图值 diff。
+  白名单映射「写工具 → 读回工具」，读回直接走 ue_client 避免递归。
+  失配/读回失败时通过修改 event.parsed_text 注入徽章警告。
+
+VisionInterceptor (Issue 007, 015):
+  截图工具调用后自动触发 Vision 分析。
   结果写入 WorldState.last_vision_verdict，供 get_context 消费。
-
-Issue 015 修订：对接 VisionSessionManager，不再直接调用 VisionSubAgent。
-  自动截图触发仍有 Vision 分析，但 Session 管理由 VisionSessionManager 负责。
 
 设计约束：
   - 仅覆盖 post_call，不改变工具调用结果
-  - Vision 分析失败不阻断主链路（异常在 post_call 内捕获）
-  - 拦截器独立：通过 get_active_skill callback 获取活跃 Skill 上下文
+  - 分析失败不阻断主链路（异常在 post_call 内捕获）
+  - 拦截器独立：通过 callback 获取外部上下文
 """
 
 from __future__ import annotations
@@ -23,10 +24,12 @@ from typing import Callable, TYPE_CHECKING
 
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
 from harness.state.models import WorldState
+from harness.state.normalize import extract_short_name, normalize_tool_args
 from harness.verification.capturer import parse_screenshot, Screenshot
 from harness.verification.vision_agent import VisionSubAgent
 
 if TYPE_CHECKING:
+    from harness.client import McpClientSession
     from harness.verification.session import VisionSessionManager
 
 logger = logging.getLogger("harness.verification.interceptor")
@@ -152,6 +155,282 @@ class VisionInterceptor(ToolCallInterceptor):
 
         except Exception as e:
             logger.error("Vision 分析异常（不阻断主流程）: %s", e)
+
+
+# ---- L2 读回验证 (Issue 016 Part A) ----
+
+# 白名单: 写工具短名 → 读回工具短名
+_READBACK_MAP: dict[str, str] = {
+    "set_actor_transform": "get_actor_transform",
+    "set_properties": "get_properties",
+}
+
+# 读回失配徽章前缀
+_READBACK_MISMATCH_PREFIX = "⚠ L2 读回失配"
+_READBACK_FAILURE_PREFIX = "⚠ L2 读回失败"
+
+
+class ReadbackInterceptor(ToolCallInterceptor):
+    """写工具调用后自动读回实际值，与意图值 diff。
+
+    白名单映射「写工具短名 → 读回工具短名」。
+    读回调用直接走 ue_client（不经过拦截器链），避免递归触发。
+    失配/读回失败时通过修改 event.parsed_text 注入徽章警告。
+
+    Args:
+        ue_client: McpClientSession 实例，用于直接调用 UE 工具。
+        cache: 全局 WorldState 实例。
+        epsilon: 浮点比较容差，默认 1e-3。
+    """
+
+    def __init__(
+        self,
+        ue_client: "McpClientSession",
+        cache: WorldState,
+        epsilon: float = 1e-3,
+    ) -> None:
+        self._ue = ue_client
+        self._cache = cache
+        self._epsilon = epsilon
+
+    # ---- ToolCallInterceptor ----
+
+    async def post_call(self, event: ToolCallCompleted) -> None:
+        """写工具成功后触发 L2 读回验证。
+
+        条件：工具名在白名单中 && 调用成功 && 能提取 actor 名。
+        """
+        if event.error is not None:
+            return
+
+        short = extract_short_name(event.name)
+        readback_short = _READBACK_MAP.get(short)
+        if readback_short is None:
+            return
+
+        nc = normalize_tool_args(short, event.args)
+        if not nc.actor_name:
+            logger.debug("L2 读回跳过: %s 缺少 actor 名", short)
+            return
+
+        # 构建读回工具的全限定名（替换短名）
+        readback_full = event.name.replace(short, readback_short)
+
+        try:
+            readback_args = _build_readback_args(short, nc, event.args)
+            if readback_args is None:
+                logger.debug("L2 读回跳过: %s 无法构建读回参数", short)
+                return
+
+            result_text = await self._ue.call_tool(readback_full, readback_args)
+            actual = _parse_readback_result(short, result_text)
+
+            mismatches = _diff_values(short, nc.payload, actual, self._epsilon)
+            if mismatches:
+                badge_lines = [_READBACK_MISMATCH_PREFIX + f": {short}({nc.actor_name})"]
+                for m in mismatches:
+                    badge_lines.append(f"  {m}")
+                badge = "\n".join(badge_lines)
+                if event.parsed_text is not None:
+                    event.parsed_text = badge + "\n" + event.parsed_text
+                logger.warning("L2 读回失配: %s → %s", short, mismatches)
+            else:
+                logger.debug("L2 读回通过: %s(%s)", short, nc.actor_name)
+                # 回写 WorldState，观测标记为已确认
+                _confirm_cache(self._cache, short, nc, actual)
+
+        except Exception as e:
+            logger.warning("L2 读回失败（不阻断主流程）: %s(%s) → %s",
+                           short, nc.actor_name, e)
+            badge = (
+                f"{_READBACK_FAILURE_PREFIX}: "
+                f"{readback_short}({nc.actor_name}) — {e}"
+            )
+            if event.parsed_text is not None:
+                event.parsed_text = badge + "\n" + event.parsed_text
+
+
+# ---- 读回辅助函数 ----
+
+
+def _build_readback_args(
+    short: str,
+    nc: "harness.state.normalize.NormalizedCall",
+    write_args: dict,
+) -> dict | None:
+    """从写工具参数构建读回工具参数。"""
+    if short == "set_actor_transform":
+        actor = write_args.get("actor")
+        if actor is None:
+            return None
+        return {"actor": actor}
+
+    if short == "set_properties":
+        instance = write_args.get("instance")
+        if instance is None:
+            return None
+        # 从 values JSON 中提取属性名列表
+        property_names = list(nc.payload.keys()) if nc.payload else []
+        if not property_names:
+            return None
+        return {"instance": instance, "properties": property_names}
+
+    return None
+
+
+def _parse_readback_result(short: str, result_text: str) -> dict | list:
+    """解析 ue_client.call_tool 返回的原始结果，提取实际值。
+
+    result_text 是 JSON-RPC result 的 JSON 字符串。
+    需要先解外层（MCP content wrapper），再解内层（工具返回值）。
+    """
+    try:
+        raw = json.loads(result_text) if isinstance(result_text, str) else result_text
+    except (json.JSONDecodeError, TypeError):
+        logger.debug("L2 读回结果解析失败（非 JSON）: %.200s", str(result_text))
+        return {}
+
+    # 提取 MCP content[0].text
+    text: str | None = None
+    if isinstance(raw, dict):
+        content = raw.get("content", [])
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    break
+    if text is None:
+        text = str(raw)
+
+    # 按工具类型解析内层值
+    if short == "set_actor_transform":
+        # get_actor_transform 返回 Transform 对象，MCP 序列化为 JSON 对象
+        # 可能直接在 raw 中，也可能在 text 中
+        return _extract_transform_value(raw)
+
+    if short == "set_properties":
+        # get_properties 返回 JSON 字符串
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    return {}
+
+
+def _extract_transform_value(raw: dict) -> dict:
+    """从 MCP 响应中提取 Transform 数据。"""
+    # 优先从 content[0].text 提取
+    content = raw.get("content", [])
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text", "")
+                if text:
+                    try:
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+    # Fallback: 如果 raw 本身就是 Transform-like dict
+    if isinstance(raw, dict) and ("translation" in raw or "rotation" in raw):
+        return raw
+    return {}
+
+
+def _diff_values(
+    short: str,
+    intent: dict,
+    actual: dict | list,
+    epsilon: float,
+) -> list[str]:
+    """比较意图值和实际值，返回失配描述列表。"""
+    mismatches: list[str] = []
+
+    if short == "set_actor_transform":
+        mismatches.extend(_diff_transform(intent, actual, epsilon))
+    elif short == "set_properties":
+        mismatches.extend(_diff_properties(intent, actual))
+
+    return mismatches
+
+
+def _diff_transform(intent: dict, actual: dict, epsilon: float) -> list[str]:
+    """比较 Transform 的 translation/rotation/scale3d。"""
+    mismatches: list[str] = []
+    xform_intent = intent.get("xform", intent)
+
+    for component in ("translation", "rotation", "scale3d"):
+        intent_vec = xform_intent.get(component, {})
+        actual_vec = actual.get(component, {})
+        if not isinstance(intent_vec, dict) or not isinstance(actual_vec, dict):
+            continue
+        for axis in ("x", "y", "z"):
+            iv = intent_vec.get(axis)
+            av = actual_vec.get(axis)
+            if iv is None or av is None:
+                continue
+            try:
+                if abs(float(iv) - float(av)) > epsilon:
+                    mismatches.append(
+                        f"{component}.{axis} 意图={iv} 实际={av}"
+                    )
+            except (ValueError, TypeError):
+                if iv != av:
+                    mismatches.append(
+                        f"{component}.{axis} 意图={iv} 实际={av}"
+                    )
+    return mismatches
+
+
+def _diff_properties(intent: dict, actual: dict) -> list[str]:
+    """按属性名逐一比较。"""
+    mismatches: list[str] = []
+    for key, intent_val in intent.items():
+        actual_val = actual.get(key)
+        if actual_val is None and key not in actual:
+            mismatches.append(f"{key} 读回结果中缺失")
+            continue
+        # 尝试数值比较
+        try:
+            if abs(float(intent_val) - float(actual_val)) > 1e-6:
+                mismatches.append(f"{key} 意图={intent_val} 实际={actual_val}")
+            continue
+        except (ValueError, TypeError):
+            pass
+        # 字符串/其他直接比较
+        if str(intent_val) != str(actual_val):
+            mismatches.append(f"{key} 意图={intent_val} 实际={actual_val}")
+    return mismatches
+
+
+def _confirm_cache(
+    cache: WorldState,
+    short: str,
+    nc: "harness.state.normalize.NormalizedCall",
+    actual: dict | list,
+) -> None:
+    """读回确认后更新 WorldState 中的实际值。"""
+    actor_name = nc.actor_name
+    if not actor_name or actor_name not in cache.actors:
+        return
+
+    actor = cache.actors[actor_name]
+    actor.last_updated = datetime.now(timezone.utc)
+
+    if short == "set_actor_transform":
+        if isinstance(actual, dict):
+            actor.transform = actual
+        # 清除 dirty 标记
+        cache.dirty_actors.discard(actor_name)
+
+    elif short == "set_properties":
+        if isinstance(actual, dict):
+            for key, val in actual.items():
+                actor.properties[key] = str(val) if not isinstance(val, str) else val
+        cache.dirty_actors.discard(actor_name)
 
 
 # ---- 工具名检测 ----

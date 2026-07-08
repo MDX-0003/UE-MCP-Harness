@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
@@ -16,7 +17,10 @@ from datetime import datetime, timezone
 from harness.interceptor import ToolCallCompleted
 from harness.state.models import WorldState
 from harness.verification.capturer import Screenshot
-from harness.verification.interceptor import VisionInterceptor
+from harness.verification.interceptor import (
+    ReadbackInterceptor,
+    VisionInterceptor,
+)
 from harness.verification.vision_agent import VisionSubAgent, VisionVerdict
 
 # 1×1 透明 PNG 的 base64 — 可通过 parse_screenshot PIL 解码
@@ -571,3 +575,247 @@ class TestVisionInterceptorVisionScreenshot:
             await interceptor.post_call(event)
 
             mock_check.assert_not_called()
+
+
+# ---- ReadbackInterceptor Tests (Issue 016 Part A) ----
+
+
+@pytest.fixture
+def mock_ue_client() -> MagicMock:
+    """创建一个 mock McpClientSession，call_tool 返回预设值。"""
+    client = MagicMock()
+    client.call_tool = AsyncMock()
+    return client
+
+
+def _write_event(
+    tool_name: str,
+    args: dict,
+    result_text: str = "ok",
+) -> ToolCallCompleted:
+    """构建模拟的写工具调用完成事件。"""
+    return ToolCallCompleted(
+        name=tool_name,
+        args=args,
+        raw_result={"content": [{"type": "text", "text": result_text}]},
+        parsed_text=result_text,
+        error=None,
+        duration_ms=50.0,
+    )
+
+
+def _readback_result_json(value: dict | list | str) -> str:
+    """构建模拟的 UE readback 工具返回值（JSON-RPC result 字符串）。"""
+    inner = value if isinstance(value, str) else json.dumps(value)
+    outer = {
+        "content": [{"type": "text", "text": inner}],
+    }
+    return json.dumps(outer)
+
+
+class TestReadbackInterceptor:
+    """L2 读回验证的基础行为。"""
+
+    async def test_white_listed_tool_triggers_readback(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """白名单内的写工具 → 触发读回，diff 通过 → 静默。"""
+        actual_transform = {
+            "translation": {"x": 100.0, "y": 200.0, "z": 0.0},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "scale3d": {"x": 1.0, "y": 1.0, "z": 1.0},
+        }
+        mock_ue_client.call_tool.return_value = _readback_result_json(
+            json.dumps(actual_transform)
+        )
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.actor.ActorTools.set_actor_transform",
+            {
+                "actor": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.SpotLight_0"
+                },
+                "xform": {
+                    "translation": {"x": 100.0, "y": 200.0, "z": 0.0},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "scale3d": {"x": 1.0, "y": 1.0, "z": 1.0},
+                },
+            },
+        )
+        await interceptor.post_call(event)
+
+        mock_ue_client.call_tool.assert_called_once()
+        call_name = mock_ue_client.call_tool.call_args.args[0]
+        assert "get_actor_transform" in call_name
+        # diff 通过时不应注入徽章
+        assert event.parsed_text == "ok"
+
+    async def test_white_listed_tool_readback_mismatch_injects_badge(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """白名单内写工具 → 读回失配 → 注入徽章警告。"""
+        actual_transform = {
+            "translation": {"x": 100.0, "y": 200.0, "z": 0.0},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "scale3d": {"x": 1.0, "y": 1.0, "z": 1.0},
+        }
+        mock_ue_client.call_tool.return_value = _readback_result_json(
+            json.dumps(actual_transform)
+        )
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.actor.ActorTools.set_actor_transform",
+            {
+                "actor": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.SpotLight_0"
+                },
+                "xform": {
+                    "translation": {"x": 100.0, "y": 200.0, "z": 0.0},
+                    "rotation": {"x": 15.0, "y": 0.0, "z": 0.0},
+                    "scale3d": {"x": 1.0, "y": 1.0, "z": 1.0},
+                },
+            },
+        )
+        await interceptor.post_call(event)
+
+        assert event.parsed_text is not None
+        assert "L2 读回失配" in event.parsed_text
+
+    async def test_non_white_listed_tool_skips(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """白名单外的工具 → 零开销跳过。"""
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "SceneTools.find_actors",
+            {"glob": "*Light*"},
+        )
+        await interceptor.post_call(event)
+
+        mock_ue_client.call_tool.assert_not_called()
+
+    async def test_error_event_skips(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """工具调用失败时不触发读回。"""
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = ToolCallCompleted(
+            name="toolset_registry.toolsets.core.actor.ActorTools.set_actor_transform",
+            args={"actor": {"refPath": "/Game/Map.Map:PersistentLevel.SpotLight_0"}},
+            raw_result=None,
+            parsed_text=None,
+            error=Exception("UE 连接超时"),
+            duration_ms=5000.0,
+        )
+        await interceptor.post_call(event)
+
+        mock_ue_client.call_tool.assert_not_called()
+
+    async def test_readback_call_failure_injects_badge(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """读回调用自身失败 → 注入失败徽章，不抛异常。"""
+        mock_ue_client.call_tool.side_effect = Exception("连接超时")
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.actor.ActorTools.set_actor_transform",
+            {
+                "actor": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.SpotLight_0"
+                },
+                "xform": {
+                    "translation": {"x": 100.0, "y": 200.0, "z": 0.0},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "scale3d": {"x": 1.0, "y": 1.0, "z": 1.0},
+                },
+            },
+        )
+        # 不应抛异常
+        await interceptor.post_call(event)
+
+        assert event.parsed_text is not None
+        assert "L2 读回失败" in event.parsed_text
+
+    async def test_set_properties_triggers_readback(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """set_properties → get_properties 读回，diff 通过。"""
+        mock_ue_client.call_tool.return_value = _readback_result_json(
+            json.dumps({"LightColor": "(1,0,0)", "Intensity": "8000"})
+        )
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.object.ObjectTools.set_properties",
+            {
+                "instance": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.SpotLight_0"
+                },
+                "values": '{"LightColor": "(1,0,0)", "Intensity": "8000"}',
+            },
+        )
+        await interceptor.post_call(event)
+
+        mock_ue_client.call_tool.assert_called_once()
+        call_name = mock_ue_client.call_tool.call_args.args[0]
+        assert "get_properties" in call_name
+        call_args = mock_ue_client.call_tool.call_args.args[1]
+        assert "properties" in call_args
+        assert set(call_args["properties"]) == {"LightColor", "Intensity"}
+
+    async def test_set_properties_mismatch_injects_badge(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """set_properties → 属性值失配 → 徽章。"""
+        mock_ue_client.call_tool.return_value = _readback_result_json(
+            json.dumps({"LightColor": "(0,0,1)", "Intensity": "8000"})
+        )
+
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.object.ObjectTools.set_properties",
+            {
+                "instance": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.SpotLight_0"
+                },
+                "values": '{"LightColor": "(1,0,0)", "Intensity": "8000"}',
+            },
+        )
+        await interceptor.post_call(event)
+
+        assert event.parsed_text is not None
+        assert "L2 读回失配" in event.parsed_text
+
+    async def test_set_label_skips_not_in_white_list(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """set_label 不在白名单中 → 跳过。"""
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.actor.ActorTools.set_label",
+            {
+                "actor": {
+                    "refPath": "/Game/Map.Map:PersistentLevel.SpotLight_0"
+                },
+                "label": "NewLabel",
+            },
+        )
+        await interceptor.post_call(event)
+
+        mock_ue_client.call_tool.assert_not_called()
+
+    async def test_no_actor_name_skips(
+        self, mock_ue_client, world_state,
+    ) -> None:
+        """无法提取 actor 名时 → 跳过。"""
+        interceptor = ReadbackInterceptor(mock_ue_client, world_state)
+        event = _write_event(
+            "toolset_registry.toolsets.core.actor.ActorTools.set_actor_transform",
+            {"xform": {"translation": {"x": 100, "y": 200, "z": 0}}},
+        )
+        await interceptor.post_call(event)
+
+        mock_ue_client.call_tool.assert_not_called()
