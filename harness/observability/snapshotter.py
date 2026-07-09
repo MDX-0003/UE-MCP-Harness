@@ -63,6 +63,8 @@ class SnapshotRecorder(ToolCallInterceptor):
         self._vision_call_count = 0
         self._skills_activated: list[str] = []
         self._tool_call_count = 0
+        self._reference_path: str | None = None
+        self._mapping_path: str | None = None
 
     # ---- 外部通知（server.py 调用） ----
 
@@ -89,6 +91,16 @@ class SnapshotRecorder(ToolCallInterceptor):
             )
         except Exception as e:
             logger.warning("Skill 停用快照写入失败: %s", e)
+
+    # ---- 参考图记录（match_reference / build_atmosphere_mapping handler 调用） ----
+
+    def set_reference_image(self, path: str) -> None:
+        """记录参考图路径."""
+        self._reference_path = path
+
+    def set_mapping_path(self, path: str) -> None:
+        """记录映射文件路径."""
+        self._mapping_path = path
 
     # ---- ToolCallInterceptor ----
 
@@ -117,6 +129,8 @@ class SnapshotRecorder(ToolCallInterceptor):
                 "skills_activated": self._skills_activated,
                 "map_path": self._cache.map_path,
                 "harness_version": __version__,
+                "reference_image": self._reference_path,
+                "mapping_path": self._mapping_path,
             }
             path = self._dir / "session.json"
             path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
