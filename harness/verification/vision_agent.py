@@ -225,6 +225,103 @@ class VisionSubAgent:
                 caveats=["请重试"],
             )
 
+    async def compare_with_reference(
+        self,
+        ref_image_b64: str,
+        cur_image_b64: str,
+        question: str,
+        scene_context: str = "",
+    ) -> VisionVerdict:
+        """双图对比——参考图 vs 当前截图，不记入 Session 对话历史。
+
+        与 check() 的区别：
+          - 同时发送两张图（参考图 + 当前图），而非单张
+          - 不追加到 self._history（单次对比，不影响 Session 内的多轮对话）
+          - 复用 _call_vision_api + _parse_verdict
+        """
+        self._call_count += 1
+
+        user_message = question
+        if scene_context:
+            user_message += f"\n\n场景上下文：\n{scene_context}"
+        user_message += _VISION_FORMAT_REMINDER
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": ref_image_b64,
+                        },
+                    },
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": cur_image_b64,
+                        },
+                    },
+                    {"type": "text", "text": user_message},
+                ],
+            }
+        ]
+
+        try:
+            response = await _call_vision_api(self.config, messages)
+            return _parse_verdict(response)
+        except Exception as e:
+            logger.error("Vision 双图对比失败: %s", e)
+            return VisionVerdict(
+                answer=f"Vision 双图对比失败: {e}",
+                confidence="low",
+                caveats=["请检查 Vision API key 和网络连接后重试"],
+            )
+
+    async def classify(self, prompt: str) -> "dict[str, Any]":
+        """纯文本分类——发 prompt 给 MiMo，返回 parsed JSON dict。
+
+        与 check() 的区别：
+          - 无图片输入（纯文本消息）
+          - 不追加到 self._history（单次分类，不影响 Session 多轮对话）
+          - 返回 raw dict 而非 VisionVerdict
+
+        Raises:
+            ValueError: MiMo 返回无法解析为 JSON
+        """
+        self._call_count += 1
+
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            }
+        ]
+
+        try:
+            response = await _call_vision_api(self.config, messages)
+        except Exception as e:
+            raise ValueError(f"MiMo 纯文本调用失败: {e}") from e
+
+        json_str = _extract_json_object(response)
+        if json_str is None:
+            raise ValueError(
+                f"MiMo 返回中未找到 JSON 对象。"
+                f"原始返回前 300 字符: {response[:300]}"
+            )
+
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"MiMo JSON 解析失败: {e}\n"
+                f"提取的 JSON 文本前 200 字符: {json_str[:200]}"
+            ) from e
+
     def reset(self) -> None:
         """重置对话历史（新任务开始时调用）。"""
         self._history.clear()
