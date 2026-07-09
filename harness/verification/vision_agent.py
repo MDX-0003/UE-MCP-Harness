@@ -308,7 +308,7 @@ class VisionSubAgent:
             raise ValueError(f"MiMo 纯文本调用失败: {e}") from e
 
         json_str = _extract_json_object(response)
-        if json_str is None:
+        if not json_str or not json_str.strip().startswith("{"):
             raise ValueError(
                 f"MiMo 返回中未找到 JSON 对象。"
                 f"原始返回前 300 字符: {response[:300]}"

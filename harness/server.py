@@ -15,6 +15,7 @@ Context Assembly（004）：
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -79,6 +80,8 @@ def build_server(
 
     # ---- 工具缓存（list_tools 调用间共享） ----
     _cached_raw_tools: list[dict] = []
+    # ---- 参考图会话状态（match_reference / vision_compare 共享） ----
+    _session_reference: dict[str, Any] = {}
     # ---- 005 Skill Registry ----
     skill_registry = SkillRegistry()
     skill_registry.load_skills()
@@ -257,6 +260,60 @@ def build_server(
             description="查看当前 Vision Session 摘要：时长、截图数、提问数、上次结论。",
             inputSchema={"type": "object", "properties": {}},
         ))
+        # ---- 参考图工具 (Plan 0708) ----
+        result.append(Tool(
+            name="vision_compare",
+            description=(
+                "双图对比验证——参考图 vs 当前截图。针对单个氛围组件做三态判定"
+                "（✓ closer / ≈ similar / ✗ further）。"
+                "默认复用 Session 内最新截图，不消耗额外截图 token。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "component": {
+                        "type": "string",
+                        "enum": ["DirectionalLight", "SkyAtmosphere", "ExponentialHeightFog",
+                                 "VolumetricCloud", "PostProcessVolume"],
+                        "description": "要对比的氛围组件",
+                    },
+                    "reuse_screenshot": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "复用 Session 内最新截图。",
+                    },
+                },
+                "required": ["component"],
+            },
+        ))
+        result.append(Tool(
+            name="match_reference",
+            description=(
+                "加载参考图，与当前 UE 视口做 8 维度整体对比（亮度/对比度/色温/"
+                "色调偏移/饱和度/大气密度/阴影方向/天空表现）。返回结构化方向性差异"
+                "+ 5 项量化指标。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "参考图文件路径（PNG/JPEG）",
+                    },
+                },
+                "required": ["path"],
+            },
+        ))
+        result.append(Tool(
+            name="build_atmosphere_mapping",
+            description=(
+                "扫描场景中 5 类氛围组件（DirectionalLight/SkyAtmosphere/"
+                "ExponentialHeightFog/VolumetricCloud/PostProcessVolume），"
+                "通过 MiMo 筛选氛围相关属性并按 8 维度分类，生成维度→属性映射。"
+                "每会话调用一次即可。"
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ))
 
         logger.info("LLM tools/list: 返回 %d 个工具（全量 %d 个，过滤后 + Harness 自有）",
                      len(result), len(_cached_raw_tools))
@@ -273,6 +330,8 @@ def build_server(
           - save_skill:     保存 Skill YAML → skill_registry.save_skill()
           - vision_* :      Issue 015 Vision Session 工具
         """
+
+        nonlocal _session_reference
 
         # 辅助：为 Harness 自有工具记录日志到 JSONL
         # 未经 UE 透传路径的工具需手动触发 ToolCallLogger
@@ -463,6 +522,397 @@ def build_server(
                 type="text", text=result_text,
             )])
 
+        # ---- 参考图工具 (Plan 0708) ----
+
+        if name == "vision_compare":
+            t0 = time.monotonic()
+            if vision_session_manager is None:
+                return CallToolResult(content=[TextContent(
+                    type="text", text="Vision Session Manager 未初始化。",
+                )], isError=True)
+            session = vision_session_manager.get_active()
+            if session is None or not session.screenshots:
+                return CallToolResult(content=[TextContent(
+                    type="text",
+                    text="没有可复用的截图。请先调 vision_screenshot 获取视口截图。",
+                )], isError=True)
+
+            component = arguments.get("component", "")
+            _valid_components = (
+                "DirectionalLight", "SkyAtmosphere", "ExponentialHeightFog",
+                "VolumetricCloud", "PostProcessVolume",
+            )
+            if component not in _valid_components:
+                return CallToolResult(content=[TextContent(
+                    type="text",
+                    text=f"无效的 component: '{component}'。"
+                         f"可选: {', '.join(_valid_components)}",
+                )], isError=True)
+
+            latest_ss = session.screenshots[-1]
+            cur_b64 = latest_ss.b64
+            ref_b64 = _session_reference.get("b64") if _session_reference else None
+            if ref_b64 is None:
+                return CallToolResult(content=[TextContent(
+                    type="text",
+                    text="未找到参考图。请先调 match_reference(path) 加载。",
+                )], isError=True)
+
+            question = (
+                f"仅关注 {component} 对画面氛围的影响，忽略其他组件的差异。\n"
+                f"当前场景在 {component} 的表现，与参考图相比：\n"
+                f"  ✓ closer — 更接近参考图了\n"
+                f"  ≈ similar — 没有明显变化\n"
+                f"  ✗ further — 更远离参考图了\n\n"
+                f"选择 ✓/≈/✗，给一句佐证。"
+            )
+
+            agent = VisionSubAgent(config)
+            try:
+                verdict = await agent.compare_with_reference(
+                    ref_b64, cur_b64, question,
+                )
+            except Exception as e:
+                duration_ms = (time.monotonic() - t0) * 1000
+                err_text = f"vision_compare 失败: {e}"
+                await _log_harness_call(name, arguments, err_text, duration_ms, error=e)
+                return CallToolResult(content=[TextContent(
+                    type="text", text=err_text,
+                )], isError=True)
+
+            duration_ms = (time.monotonic() - t0) * 1000
+            result_text = json.dumps({
+                "answer": verdict.answer,
+                "confidence": verdict.confidence,
+                "caveats": verdict.caveats,
+                "observations": verdict.observations,
+            }, ensure_ascii=False, indent=2)
+            await _log_harness_call(name, arguments, result_text, duration_ms)
+            return CallToolResult(content=[TextContent(type="text", text=result_text)])
+
+        if name == "match_reference":
+            t0 = time.monotonic()
+            ref_path_str = arguments.get("path", "")
+
+            # 1. 加载参考图
+            try:
+                from PIL import Image as PILImage
+                from pathlib import Path as _Path
+                ref_path = _Path(ref_path_str).expanduser().resolve()
+                if not ref_path.exists():
+                    return CallToolResult(content=[TextContent(
+                        type="text", text=f"参考图不存在: {ref_path}",
+                    )], isError=True)
+                ref_img = PILImage.open(ref_path).convert("RGB")
+            except Exception as e:
+                return CallToolResult(content=[TextContent(
+                    type="text", text=f"加载参考图失败: {e}",
+                )], isError=True)
+
+            # 2. 截当前视口
+            try:
+                from harness.verification.capturer import capture as capturer_capture
+                max_w, max_h = config.vision_max_size
+                screenshot = await capturer_capture(
+                    ue_client, max_w, max_h, mode="viewport",
+                )
+                cur_b64 = screenshot.data_b64
+            except Exception as e:
+                return CallToolResult(content=[TextContent(
+                    type="text", text=f"截图失败: {e}",
+                )], isError=True)
+
+            # 3. 参考图 → base64
+            import io as _io
+            buf = _io.BytesIO()
+            ref_img.save(buf, format="PNG")
+            ref_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+            _session_reference = {"b64": ref_b64, "path": str(ref_path)}
+
+            # 4. 量化指标
+            from harness.verification.metrics import compute_match_metrics
+            try:
+                cur_img = _b64_to_pil(cur_b64)
+            except Exception:
+                cur_img = None
+
+            metrics_error: str | None = None
+            metrics_result = None
+            if cur_img is not None:
+                try:
+                    metrics_result = compute_match_metrics(ref_img, cur_img)
+                    _session_reference["metrics"] = metrics_result
+                except Exception as e:
+                    logger.warning("量化指标计算失败（非致命）: %s", e)
+                    metrics_error = str(e)
+            else:
+                metrics_error = "当前截图无法解码为 PIL Image"
+
+            # 5. MiMo 8 维度双图对比
+            question = (
+                "请从以下 8 个维度比较当前截图与参考图的差异。"
+                "每个维度只输出方向性判定，不需要描述绝对值：\n\n"
+                "亮度 (Brightness):       darker / similar / brighter\n"
+                "对比度 (Contrast):       lower / similar / higher\n"
+                "色温 (Color Temperature): cooler / similar / warmer\n"
+                "色调偏移 (Color Cast):    none / 偏X色\n"
+                "饱和度 (Saturation):      less_saturated / similar / more_saturated\n"
+                "大气密度 (Haze):          clearer / similar / hazier\n"
+                "阴影方向 (Shadow Direction): 方向描述 + 是否一致\n"
+                "天空表现 (Sky):           颜色/云量/渐变的差异方向\n\n"
+                "每个判定配一句话佐证（你看到什么让你这样判断）。"
+            )
+
+            agent = VisionSubAgent(config)
+            try:
+                verdict = await agent.compare_with_reference(ref_b64, cur_b64, question)
+            except Exception as e:
+                duration_ms = (time.monotonic() - t0) * 1000
+                err_text = f"match_reference Vision 调用失败: {e}"
+                await _log_harness_call(name, arguments, err_text, duration_ms, error=e)
+                return CallToolResult(content=[TextContent(
+                    type="text", text=err_text,
+                )], isError=True)
+
+            # 6. 组装返回文本
+            duration_ms = (time.monotonic() - t0) * 1000
+            ref_w, ref_h = ref_img.size
+
+            lines = [
+                f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
+                "",
+                "MiMo 8 维度差异：",
+                verdict.answer,
+            ]
+
+            if metrics_result:
+                m = metrics_result
+                lines.append("")
+                lines.append("量化指标（全图统计，不受视点移动影响）：")
+                lines.append(f"{'':>12} {'参考图':>8} {'当前':>8} {'差异':>10}")
+                lines.append(
+                    f"{'亮度':>12} {m['luminance']['ref']:>8.1f} "
+                    f"{m['luminance']['cur']:>8.1f} {m['luminance']['delta_pct']:>+9.1f}%"
+                )
+                lines.append(
+                    f"{'对比度':>12} {m['contrast']['ref']:>8.1f} "
+                    f"{m['contrast']['cur']:>8.1f} {m['contrast']['delta_pct']:>+9.1f}%"
+                )
+                ct = m["color_temperature"]
+                lines.append(
+                    f"{'色温':>12} {'R/B=' + str(ct['ref_r_b_ratio']):>8} "
+                    f"{'R/B=' + str(ct['cur_r_b_ratio']):>8}"
+                )
+                lines.append(
+                    f"{'饱和度':>12} {m['saturation']['ref']:>8.1f} "
+                    f"{m['saturation']['cur']:>8.1f} {m['saturation']['delta_pct']:>+9.1f}%"
+                )
+                lines.append(
+                    f"{'直方图相似度':>12} {'':>8} {'':>8} "
+                    f"{m['histogram_correlation']:>10.2f} (0→完全不同, 1→完全一致)"
+                )
+            elif metrics_error:
+                lines.append(f"\n⚠ 量化指标计算失败: {metrics_error}")
+                lines.append("MiMo 分析仍然有效。")
+
+            lines.append("")
+            lines.append("下一步：如尚未生成参数映射，请调 build_atmosphere_mapping()。")
+            lines.append("完成后对照映射和差异调整各组件。交叉参考 MiMo 分析和量化指标——")
+            lines.append("两者一致则高置信，不一致则以 MiMo 为主、量化指标为参考修正。")
+
+            result_text = "\n".join(lines)
+            await _log_harness_call(name, arguments, result_text, duration_ms)
+            return CallToolResult(content=[TextContent(type="text", text=result_text)])
+
+        if name == "build_atmosphere_mapping":
+            t0 = time.monotonic()
+
+            ATMOSPHERE_TYPES = [
+                "DirectionalLight", "SkyAtmosphere", "ExponentialHeightFog",
+                "VolumetricCloud", "PostProcessVolume",
+            ]
+
+            # Step 1: 扫描 5 类组件
+            scan_lines: list[str] = []
+            actors_found: dict[str, list[str]] = {}
+            all_properties: dict[str, dict[str, list[str]]] = {}
+
+            for actor_type in ATMOSPHERE_TYPES:
+                try:
+                    result_text = await ue_client.call_tool(
+                        "SceneTools.find_actors",
+                        {"glob": f"*{actor_type}*", "tag": ""},
+                    )
+                    parsed = _parse_raw_result(result_text)
+                    actor_list = _extract_actor_names(parsed)
+                    actors_found[actor_type] = actor_list
+                    count = len(actor_list)
+                    if count == 1:
+                        scan_lines.append(f"  {actor_type}: 1 个 ({actor_list[0]})")
+                    elif count > 1:
+                        scan_lines.append(
+                            f"  {actor_type}: {count} 个 "
+                            f"({', '.join(actor_list[:3])}"
+                            f"{'...' if count > 3 else ''}) ⚠ 多实例，需确认"
+                        )
+                    else:
+                        scan_lines.append(
+                            f"  {actor_type}: 未找到 → "
+                            f"请调 add_to_scene_from_class 创建"
+                        )
+                except Exception as e:
+                    scan_lines.append(f"  {actor_type}: 查询失败 ({e})")
+
+            # Step 2: 获取属性名
+            for actor_type, actor_names in actors_found.items():
+                if not actor_names:
+                    continue
+                all_properties[actor_type] = {}
+                for actor_name in actor_names[:1]:
+                    try:
+                        props_result = await ue_client.call_tool(
+                            "ObjectTools.list_properties",
+                            {"actor_name": actor_name},
+                        )
+                        props_parsed = _parse_raw_result(props_result)
+                        props_text = _extract_parsed_text(
+                            props_parsed, props_result,
+                        )
+                        prop_names = _extract_property_names(props_text)
+                        all_properties[actor_type][actor_name] = prop_names
+                    except Exception as e:
+                        logger.warning(
+                            "获取 %s 属性列表失败: %s", actor_name, e,
+                        )
+                        all_properties[actor_type][actor_name] = []
+
+            # Step 3: 组装 MiMo 分类 prompt
+            prompt_parts = [
+                "以下是从 UE 场景中提取的 5 类氛围组件及其所有属性名。",
+                "请筛选与氛围视觉表现相关的属性（排除碰撞、Tick、调试等无关属性）。",
+                "对每个属性标注其影响的高维维度：",
+                "brightness / contrast / color_temp / color_cast / saturation "
+                "/ haze / shadow_direction / sky。",
+                "",
+            ]
+            for actor_type in ATMOSPHERE_TYPES:
+                props = all_properties.get(actor_type, {})
+                if not props:
+                    prompt_parts.append(
+                        f"### {actor_type}: (场景中未找到此组件)"
+                    )
+                    continue
+                for actor_name, prop_names in props.items():
+                    prompt_parts.append(f"### {actor_type} ({actor_name})")
+                    if prop_names:
+                        for p in prop_names:
+                            prompt_parts.append(f"  - {p}")
+                    else:
+                        prompt_parts.append("  (获取属性失败)")
+                    prompt_parts.append("")
+
+            prompt_parts.append(
+                "输出 JSON，格式如下"
+                "（一个属性可标注多个维度，空维度输出空数组）："
+            )
+            prompt_parts.append(json.dumps({
+                "brightness": [
+                    {"actor_type": "DirectionalLight", "property": "Intensity"},
+                ],
+                "color_temp": [
+                    {
+                        "actor_type": "DirectionalLight",
+                        "property": "LightColor",
+                    },
+                    {
+                        "actor_type": "PostProcessVolume",
+                        "property": "WhiteBalance",
+                    },
+                ],
+            }, indent=2, ensure_ascii=False))
+            prompt_parts.append("")
+            prompt_parts.append("只输出 JSON，不要有其他文字。")
+
+            prompt = "\n".join(prompt_parts)
+
+            # Step 4: MiMo 分类
+            agent = VisionSubAgent(config)
+            try:
+                mapping = await agent.classify(prompt)
+            except ValueError as e:
+                duration_ms = (time.monotonic() - t0) * 1000
+                err_text = f"MiMo 分类失败: {e}"
+                # 降级：返回原始属性列表
+                fallback_lines = [
+                    "⚠ MiMo 分类失败，以下是 5 类组件的原始属性列表。",
+                    "请 LLM 自行筛选氛围相关属性并调整。",
+                    "",
+                ]
+                for actor_type in ATMOSPHERE_TYPES:
+                    props = all_properties.get(actor_type, {})
+                    if not props:
+                        continue
+                    for actor_name, prop_names in props.items():
+                        fallback_lines.append(
+                            f"## {actor_type} ({actor_name})"
+                        )
+                        for p in prop_names:
+                            fallback_lines.append(f"  - {p}")
+                        fallback_lines.append("")
+                await _log_harness_call(
+                    name, arguments,
+                    f"MiMo 失败，返回原始属性列表 ({err_text})",
+                    duration_ms, error=e,
+                )
+                return CallToolResult(content=[TextContent(
+                    type="text", text="\n".join(fallback_lines),
+                )])
+
+            # Step 5: JSON → Markdown 表格
+            md_content = _render_mapping_markdown(mapping)
+            total_props = sum(
+                len(props) for props in mapping.values()
+                if isinstance(props, list)
+            )
+
+            # Step 6: 写入文件（fallback 路径）
+            mapping_path = ""
+            if snapshot_recorder is not None:
+                try:
+                    from pathlib import Path as _Path
+                    log_base = config.log_dir
+                    session_name = getattr(
+                        snapshot_recorder, "_snapshot_dir", None,
+                    )
+                    if session_name is not None:
+                        session_name = _Path(getattr(
+                            session_name, "name", "",  # noqa — defensive
+                        ))
+                        # snapshot_recorder._snapshot_dir is a Path
+                        pass
+                    mapping_path = str(log_base / "atmosphere-mapping.md")
+                    _Path(mapping_path).write_text(
+                        md_content, encoding="utf-8",
+                    )
+                    snapshot_recorder.set_mapping_path(mapping_path)
+                except Exception as e:
+                    logger.warning("写入 atmosphere-mapping.md 失败: %s", e)
+
+            # Step 7: 组装返回——内联完整映射
+            duration_ms = (time.monotonic() - t0) * 1000
+            result_text = (
+                "氛围组件扫描完成：\n"
+                + "\n".join(scan_lines)
+                + f"\n\n映射已生成：{total_props} 个氛围相关属性"
+                + (f" → {mapping_path}" if mapping_path else "")
+                + "\n\n---\n\n"
+                + md_content
+            )
+
+            await _log_harness_call(name, arguments, result_text, duration_ms)
+            return CallToolResult(content=[TextContent(type="text", text=result_text)])
+
         if name == "vision_screenshot":
             """Harness 截图工具 — 通过 capturer.capture() 统一获取截图。
 
@@ -634,6 +1084,102 @@ def build_server(
     )
 
     return server
+
+
+# ---- 参考图辅助函数 (Plan 0708) ----
+
+
+def _b64_to_pil(b64: str) -> "Image.Image":
+    """base64 PNG → PIL Image (RGB)."""
+    import io as _io
+    from PIL import Image as PILImage
+    return PILImage.open(_io.BytesIO(base64.b64decode(b64))).convert("RGB")
+
+
+def _extract_actor_names(parsed: Any) -> list[str]:
+    """从 find_actors 返回值中提取 actor 名称列表."""
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if item]
+    if isinstance(parsed, dict):
+        for key in ("actors", "result", "data"):
+            val = parsed.get(key)
+            if isinstance(val, list):
+                return [str(item) for item in val if item]
+        rv = parsed.get("returnValue")
+        if isinstance(rv, list):
+            return [str(item) for item in rv if item]
+    text = str(parsed)
+    lines = text.strip().split("\n")
+    return [line.strip() for line in lines if line.strip()
+            and not line.startswith("{")]
+
+
+def _extract_property_names(parsed_text: str | None) -> list[str]:
+    """从 list_properties 的返回文本中提取属性名列表."""
+    if not parsed_text:
+        return []
+    names: list[str] = []
+    for line in parsed_text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        for delim in (":", " ("):
+            if delim in line:
+                name = line.split(delim)[0].strip()
+                if name and not name.startswith("#") \
+                        and not name.startswith("//"):
+                    names.append(name)
+                break
+        else:
+            if not line.startswith("#") and len(line) < 100:
+                names.append(line)
+    return names
+
+
+def _render_mapping_markdown(mapping: dict[str, Any]) -> str:
+    """将维度分组映射 dict 转为 Markdown 表格.
+
+    Args:
+        mapping: {"brightness": [{actor_type, property}, ...], ...}
+
+    Returns:
+        渲染后的 Markdown 文本
+    """
+    DIM_LABELS: dict[str, str] = {
+        "brightness": "亮度 (Brightness)",
+        "contrast": "对比度 (Contrast)",
+        "color_temp": "色温 (Color Temperature)",
+        "color_cast": "色调偏移 (Color Cast)",
+        "saturation": "饱和度 (Saturation)",
+        "haze": "大气密度 (Haze)",
+        "shadow_direction": "阴影方向 (Shadow Direction)",
+        "sky": "天空表现 (Sky)",
+    }
+
+    lines = ["# Atmosphere Mapping", ""]
+    total = 0
+
+    for dim_key, dim_label in DIM_LABELS.items():
+        props = mapping.get(dim_key)
+        if not props or not isinstance(props, list) or len(props) == 0:
+            continue
+        total += len(props)
+        lines.append(f"## {dim_label}")
+        lines.append("")
+        lines.append("| 组件 | 属性 |")
+        lines.append("|------|------|")
+        for entry in props:
+            if not isinstance(entry, dict):
+                continue
+            actor_type = entry.get("actor_type", "")
+            prop = entry.get("property", "")
+            if actor_type and prop:
+                lines.append(f"| {actor_type} | {prop} |")
+        lines.append("")
+
+    lines.insert(1, f"共 {total} 个氛围相关属性")
+    lines.insert(2, "")
+    return "\n".join(lines)
 
 
 def _parse_raw_result(result_text: str | None) -> Any:

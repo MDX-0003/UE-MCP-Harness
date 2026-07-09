@@ -941,3 +941,191 @@ class TestReadbackInterceptor:
         assert event.parsed_text is not None
         assert "L2 读回失配" in event.parsed_text
         assert "settings.ColorContrast" in event.parsed_text
+
+
+# ---- Reference Image Tools (Plan 0708) ----
+
+
+class TestReferenceImageMetrics:
+    """compute_match_metrics 的快速冒烟（详细测试在 test_metrics.py）."""
+
+    def test_identical_images(self):
+        from harness.verification.metrics import compute_match_metrics
+        from PIL import Image
+        ref = Image.new("RGB", (50, 40), (100, 150, 200))
+        cur = Image.new("RGB", (50, 40), (100, 150, 200))
+        result = compute_match_metrics(ref, cur)
+        assert result["histogram_correlation"] == pytest.approx(1.0, abs=0.002)
+        assert result["luminance"]["delta_pct"] == pytest.approx(0.0, abs=0.2)
+
+    def test_different_images_detected(self):
+        from harness.verification.metrics import compute_match_metrics
+        from PIL import Image
+        ref = Image.new("RGB", (50, 40), (255, 255, 255))
+        cur = Image.new("RGB", (50, 40), (0, 0, 0))
+        result = compute_match_metrics(ref, cur)
+        assert result["luminance"]["delta_pct"] < -99
+        assert result["histogram_correlation"] < 0.1
+
+
+class TestVisionCompareWithReference:
+    """VisionSubAgent.compare_with_reference() 双图对比."""
+
+    @pytest.fixture
+    def mock_config(self) -> MagicMock:
+        from harness.config import Config
+        cfg = MagicMock(spec=Config)
+        cfg.vision_api_key = "test-key"
+        cfg.vision_api_base_url = "https://test.example.com"
+        cfg.vision_model = "test-model"
+        return cfg
+
+    async def test_compare_returns_verdict(self, mock_config):
+        from harness.verification.vision_agent import VisionSubAgent
+        agent = VisionSubAgent(mock_config)
+
+        with patch(
+            "harness.verification.vision_agent._call_vision_api",
+            new_callable=AsyncMock,
+        ) as mock_api:
+            mock_api.return_value = json.dumps({
+                "answer": "亮度相似",
+                "confidence": "high",
+                "caveats": [],
+                "observations": [
+                    {"what": "亮度比较", "finding": "similar", "confidence": "high"}
+                ],
+            })
+            verdict = await agent.compare_with_reference(
+                _TINY_PNG_B64, _TINY_PNG_B64, "比较亮度",
+            )
+
+        assert verdict.answer == "亮度相似"
+        assert verdict.confidence == "high"
+        assert agent.history_length == 0
+
+    async def test_compare_api_error_returns_fallback(self, mock_config):
+        from harness.verification.vision_agent import VisionSubAgent
+        agent = VisionSubAgent(mock_config)
+
+        with patch(
+            "harness.verification.vision_agent._call_vision_api",
+            new_callable=AsyncMock,
+        ) as mock_api:
+            mock_api.side_effect = RuntimeError("API 不可达")
+            verdict = await agent.compare_with_reference(
+                _TINY_PNG_B64, _TINY_PNG_B64, "test",
+            )
+
+        assert "失败" in verdict.answer
+        assert verdict.confidence == "low"
+        assert len(verdict.caveats) > 0
+
+
+class TestVisionClassify:
+    """VisionSubAgent.classify() 纯文本 MiMo 分类."""
+
+    @pytest.fixture
+    def mock_config(self) -> MagicMock:
+        from harness.config import Config
+        cfg = MagicMock(spec=Config)
+        cfg.vision_api_key = "test-key"
+        cfg.vision_api_base_url = "https://test.example.com"
+        cfg.vision_model = "test-model"
+        return cfg
+
+    async def test_classify_returns_dict(self, mock_config):
+        from harness.verification.vision_agent import VisionSubAgent
+        agent = VisionSubAgent(mock_config)
+
+        expected = {
+            "brightness": [
+                {"actor_type": "DirectionalLight", "property": "Intensity"},
+            ],
+            "color_temp": [
+                {"actor_type": "DirectionalLight", "property": "LightColor"},
+            ],
+        }
+
+        with patch(
+            "harness.verification.vision_agent._call_vision_api",
+            new_callable=AsyncMock,
+        ) as mock_api:
+            mock_api.return_value = (
+                "以下为结果：\n"
+                + json.dumps(expected, ensure_ascii=False)
+                + "\n 完成。"
+            )
+            result = await agent.classify("测试")
+
+        assert result == expected
+        assert agent.history_length == 0
+
+    async def test_classify_no_json_raises_value_error(self, mock_config):
+        from harness.verification.vision_agent import VisionSubAgent
+        agent = VisionSubAgent(mock_config)
+
+        with patch(
+            "harness.verification.vision_agent._call_vision_api",
+            new_callable=AsyncMock,
+        ) as mock_api:
+            # Text without curly braces triggers "未找到 JSON" path
+            mock_api.return_value = "no json here just plain text without any braces"
+            with pytest.raises(ValueError, match="未找到 JSON"):
+                await agent.classify("测试")
+
+    async def test_classify_malformed_json_raises_value_error(self, mock_config):
+        from harness.verification.vision_agent import VisionSubAgent
+        agent = VisionSubAgent(mock_config)
+
+        with patch(
+            "harness.verification.vision_agent._call_vision_api",
+            new_callable=AsyncMock,
+        ) as mock_api:
+            mock_api.return_value = '{"broken": }'
+            with pytest.raises(ValueError, match="JSON 解析失败"):
+                await agent.classify("测试")
+
+
+class TestRenderMappingMarkdown:
+    """_render_mapping_markdown() 维度分组 JSON → Markdown 表格."""
+
+    def test_basic_rendering(self):
+        from harness.server import _render_mapping_markdown
+        mapping = {
+            "brightness": [
+                {"actor_type": "DirectionalLight", "property": "Intensity"},
+                {"actor_type": "SkyAtmosphere", "property": "SunIntensity"},
+            ],
+            "color_temp": [
+                {"actor_type": "DirectionalLight", "property": "LightColor"},
+            ],
+        }
+        md = _render_mapping_markdown(mapping)
+        assert "## 亮度 (Brightness)" in md
+        assert "| DirectionalLight | Intensity |" in md
+        assert "| SkyAtmosphere | SunIntensity |" in md
+        assert "## 色温 (Color Temperature)" in md
+        assert "| DirectionalLight | LightColor |" in md
+        assert "共 3 个氛围相关属性" in md
+
+    def test_empty_dimension_skipped(self):
+        from harness.server import _render_mapping_markdown
+        mapping: dict = {
+            "brightness": [],
+            "contrast": [],
+        }
+        md = _render_mapping_markdown(mapping)
+        assert "亮度" not in md
+        assert "对比度" not in md
+
+    def test_missing_dimension_key_skipped(self):
+        from harness.server import _render_mapping_markdown
+        mapping = {
+            "brightness": [
+                {"actor_type": "DirectionalLight", "property": "Intensity"},
+            ],
+        }
+        md = _render_mapping_markdown(mapping)
+        assert "## 色温" not in md
+        assert "共 1 个氛围相关属性" in md
