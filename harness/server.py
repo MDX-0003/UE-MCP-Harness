@@ -18,6 +18,7 @@ import asyncio
 import base64
 import json
 import logging
+from pathlib import Path
 import time
 from typing import Any
 
@@ -55,6 +56,7 @@ def build_server(
     snapshot_recorder: Any | None = None,
     pending_screenshot_ref: list[Any] | None = None,
     vision_session_manager: Any | None = None,
+    skills_dir: "Path | None" = None,
 ) -> Server:
     """构建 MCP Server 实例。
 
@@ -83,7 +85,8 @@ def build_server(
     # ---- 参考图会话状态（match_reference / vision_compare 共享） ----
     _session_reference: dict[str, Any] = {}
     # ---- 005 Skill Registry ----
-    skill_registry = SkillRegistry()
+    _skills_dir = skills_dir if skills_dir is not None else (Path.home() / ".ue-harness" / "skills")
+    skill_registry = SkillRegistry(skills_dir=_skills_dir)
     skill_registry.load_skills()
 
     def _list_skill_names() -> str:
@@ -349,6 +352,8 @@ def build_server(
                     except Exception as e:
                         logger.error("日志写入失败 %s: %s", tool_name, e)
                     break
+
+        from harness.verification.vision_agent import VisionSubAgent
 
         # ---- Harness 自有工具 ----
 
@@ -741,7 +746,7 @@ def build_server(
             for actor_type in ATMOSPHERE_TYPES:
                 try:
                     result_text = await ue_client.call_tool(
-                        "SceneTools.find_actors",
+                        "find_actors",
                         {"glob": f"*{actor_type}*", "tag": ""},
                     )
                     parsed = _parse_raw_result(result_text)
@@ -772,7 +777,7 @@ def build_server(
                 for actor_name in actor_names[:1]:
                     try:
                         props_result = await ue_client.call_tool(
-                            "ObjectTools.list_properties",
+                            "list_properties",
                             {"actor_name": actor_name},
                         )
                         props_parsed = _parse_raw_result(props_result)

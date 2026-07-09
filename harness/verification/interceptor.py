@@ -187,7 +187,7 @@ class ReadbackInterceptor(ToolCallInterceptor):
         self,
         ue_client: "McpClientSession",
         cache: WorldState,
-        epsilon: float = 1e-3,
+        epsilon: float = 5e-3,
     ) -> None:
         self._ue = ue_client
         self._cache = cache

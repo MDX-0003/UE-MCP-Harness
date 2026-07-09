@@ -110,6 +110,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     from harness.observability.snapshotter import SnapshotRecorder
     from harness.verification.capturer import init_shot_session, close_shot_session
 
+    # 项目 skills 目录（优先项目目录，回退到用户目录）
+    _SKILLS_PATH = (Path(__file__).parent.parent / "skills").resolve()
+
     # 加载 Vision 配置（.vision.env）
     load_vision_env()
 
@@ -267,10 +270,11 @@ def cmd_start(args: argparse.Namespace) -> int:
                                   world_state=_cache, skill_ref=_active_skill_ref,
                                   snapshot_recorder=snapshot_recorder,
                                   pending_screenshot_ref=_pending_screenshot_ref,
-                                  vision_session_manager=_vision_session_mgr)
+                                  vision_session_manager=_vision_session_mgr,
+                                  skills_dir=_SKILLS_PATH)
 
             # 初始化 instructions：列出可用 Skill（含触发词，供 LLM 匹配用户意图）
-            skill_registry = SkillRegistry()
+            skill_registry = SkillRegistry(skills_dir=_SKILLS_PATH)
             skill_registry.load_skills()
             skills = skill_registry.list_skills()
             if skills:
