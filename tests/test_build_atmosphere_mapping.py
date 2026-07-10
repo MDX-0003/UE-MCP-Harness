@@ -248,3 +248,77 @@ class TestBuildAtmosphereMapping:
         text = result.root.content[0].text
         assert "共 0 个氛围相关属性" in text
         assert "未找到" in text  # 所有组件都标记为未找到
+
+
+class TestBuildAtmosphereMappingFileOutput:
+    """验证 mapping.md 文件落盘."""
+
+    @pytest.mark.asyncio
+    async def test_writes_mapping_file(
+        self, mock_ue_client: AsyncMock, mock_classify: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """验证 build_atmosphere_mapping 将 mapping.md 写入 log 目录."""
+        from harness.state.models import WorldState
+        from harness.observability.snapshotter import SnapshotRecorder
+
+        cache = WorldState()
+        recorder = SnapshotRecorder(snapshot_dir=tmp_path, cache=cache)
+
+        server = build_server(
+            config=Config(log_dir=tmp_path),
+            ue_client=mock_ue_client,
+            interceptors=[DebugPreCallInterceptor()],
+            skills_dir=Path("skills"),
+            snapshot_recorder=recorder,
+        )
+
+        from mcp.types import CallToolRequest as CTR
+        handler_fn = server.request_handlers[CTR]
+        req = CallToolRequest(
+            method="tools/call",
+            params=CallToolRequestParams(
+                name="build_atmosphere_mapping", arguments={},
+            ),
+            jsonrpc="2.0", id=1,
+        )
+        ctx = RequestContext(
+            request_id="req-1", meta=None,
+            session=MagicMock(), lifespan_context=None, request=req,
+        )
+
+        with patch(
+            "harness.verification.vision_agent.VisionSubAgent",
+            return_value=mock_classify,
+        ):
+            token = request_ctx.set(ctx)
+            try:
+                result = await handler_fn(req)
+            finally:
+                request_ctx.reset(token)
+
+        text = result.root.content[0].text
+
+        # ---- 验证 1: mapping.md 文件已创建 ----
+        mapping_path = tmp_path / "atmosphere-mapping.md"
+        assert mapping_path.exists(), (
+            f"mapping.md 未生成于 {tmp_path}，目录内容: {list(tmp_path.iterdir())}"
+        )
+
+        # ---- 验证 2: 文件内容与 tool response 中的映射表一致 ----
+        file_content = mapping_path.read_text(encoding="utf-8")
+        assert "Atmosphere Mapping" in file_content
+        assert "## 亮度 (Brightness)" in file_content
+        assert "| DirectionalLight | Intensity |" in file_content
+        # 文件内容应与 response 的映射表部分一致
+        assert "2 个氛围相关属性" in file_content
+
+        # ---- 验证 3: tool response 包含文件路径 ----
+        mapping_path_str = str(mapping_path)
+        assert mapping_path_str in text, (
+            f"response 应包含 mapping 文件路径，实际: {text[-200:]}"
+        )
+
+        # ---- 验证 4: SnapshotRecorder 记录了 mapping_path ----
+        assert recorder._mapping_path is not None
+        assert "atmosphere-mapping.md" in recorder._mapping_path
