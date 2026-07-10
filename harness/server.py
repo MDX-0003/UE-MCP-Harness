@@ -832,21 +832,30 @@ def build_server(
         if name == "build_atmosphere_mapping":
             t0 = time.monotonic()
 
-            ATMOSPHERE_TYPES = [
-                "DirectionalLight", "SkyAtmosphere", "ExponentialHeightFog",
-                "VolumetricCloud", "PostProcessVolume",
-            ]
+            # 5 类氛围组件的 UE 类引用
+            # 使用 actor_type (class refPath) 而非 glob:
+            # UE find_actors 的 glob 匹配对长模式不可靠,
+            # "*DirectionalLight*" 返回空但 "*Light*" 能找到,
+            # class 引用是精确匹配, 无此问题.
+            # 详见 docs/handoff/find_actors_glob_issue.md
+            ATMOSPHERE_TYPES: dict[str, str] = {
+                "DirectionalLight": "/Script/Engine.DirectionalLight",
+                "SkyAtmosphere": "/Script/Engine.SkyAtmosphere",
+                "ExponentialHeightFog": "/Script/Engine.ExponentialHeightFog",
+                "VolumetricCloud": "/Script/Engine.VolumetricCloud",
+                "PostProcessVolume": "/Script/Engine.PostProcessVolume",
+            }
 
             # Step 1: 扫描 5 类组件
             scan_lines: list[str] = []
             actors_found: dict[str, list[str]] = {}
             all_properties: dict[str, dict[str, list[str]]] = {}
 
-            for actor_type in ATMOSPHERE_TYPES:
+            for actor_type, class_path in ATMOSPHERE_TYPES.items():
                 try:
                     result_text = await ue_client.call_tool(
                         "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
-                        {"glob": f"*{actor_type}*", "tag": ""},
+                        {"tag": "", "actor_type": {"refPath": class_path}},
                     )
                     parsed = _parse_raw_result(result_text)
                     actor_list = _extract_actor_names(parsed)

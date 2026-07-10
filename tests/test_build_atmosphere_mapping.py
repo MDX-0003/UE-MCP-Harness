@@ -23,15 +23,15 @@ def mock_ue_client() -> AsyncMock:
     client = AsyncMock()
     client.list_tools = AsyncMock(return_value=[])
 
-    def _actor_reply(glob_val: str) -> list[dict]:
+    def _actor_reply(class_ref: str) -> list[dict]:
         actor_map = {
-            "*DirectionalLight*": [{"refPath": "/Game/DirLight"}],
-            "*SkyAtmosphere*": [{"refPath": "/Game/SkyAtmo"}],
-            "*ExponentialHeightFog*": [{"refPath": "/Game/Fog"}],
-            "*VolumetricCloud*": [{"refPath": "/Game/Cloud"}],
-            "*PostProcessVolume*": [],
+            "/Script/Engine.DirectionalLight": [{"refPath": "/Game/DirLight"}],
+            "/Script/Engine.SkyAtmosphere": [{"refPath": "/Game/SkyAtmo"}],
+            "/Script/Engine.ExponentialHeightFog": [{"refPath": "/Game/Fog"}],
+            "/Script/Engine.VolumetricCloud": [{"refPath": "/Game/Cloud"}],
+            "/Script/Engine.PostProcessVolume": [],
         }
-        return actor_map.get(glob_val, [])
+        return actor_map.get(class_ref, [])
 
     # 各组件类型的真实属性集（精简版，保留氛围相关 + 无关属性以验证 MiMo 筛选）
     _component_properties: dict[str, str] = {
@@ -103,12 +103,16 @@ def mock_ue_client() -> AsyncMock:
     }
 
     _FIND = "toolset_registry.toolsets.core.scene.SceneTools.find_actors"
+    _FIND_SHORT = "find_actors"
     _LIST = "toolset_registry.toolsets.core.object.ObjectTools.list_properties"
+    _LIST_SHORT = "list_properties"
 
     async def _mock_call_tool(name: str, args: dict) -> str:
-        if name == _FIND:
-            return json.dumps({"returnValue": _actor_reply(args.get("glob", ""))})
-        elif name == _LIST:
+        if name in (_FIND, _FIND_SHORT):
+            # 使用 actor_type (class refPath) 进行查找
+            class_ref = args.get("actor_type", {}).get("refPath", "")
+            return json.dumps({"returnValue": _actor_reply(class_ref)})
+        elif name in (_LIST, _LIST_SHORT):
             actor_name = args.get("actor_name", "")
             prop_key = ""
             if "DirLight" in actor_name:
@@ -249,10 +253,22 @@ class TestBuildAtmosphereMapping:
         assert "Intensity" in prompt, "prompt 应包含属性名"
         assert "fogDensity" in prompt, "prompt 应包含 fog 属性"
         assert "brightness" in prompt.lower(), "prompt 应包含维度指导"
-        # prompt 应包含无关属性（collision/tick 类），验证 MiMo 的筛选职责
         assert "bEnableLightShaftOcclusion" in prompt, (
             "prompt 应包含无关属性以验证 MiMo 筛选"
         )
+        # ---- 验证 4b: 使用 actor_type 而非 glob ----
+        find_call_args = [
+            c.args for c in mock_ue_client.call_tool.mock_calls
+            if c.args[0] in ("find_actors", _FIND)
+        ]
+        for call_args in find_call_args:
+            params = call_args[1]
+            assert "actor_type" in params, (
+                f"应使用 actor_type 参数, 实际: {params}"
+            )
+            assert "refPath" in params.get("actor_type", {}), (
+                f"actor_type 应包含 class refPath, 实际: {params}"
+            )
 
         # ---- 验证 5: 返回体包含扫描摘要和映射表 ----
         assert "DirectionalLight: 1 个" in text, "扫描摘要应列出找到的组件"
