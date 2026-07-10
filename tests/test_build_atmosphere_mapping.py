@@ -102,10 +102,13 @@ def mock_ue_client() -> AsyncMock:
         ),
     }
 
+    _FIND = "toolset_registry.toolsets.core.scene.SceneTools.find_actors"
+    _LIST = "toolset_registry.toolsets.core.object.ObjectTools.list_properties"
+
     async def _mock_call_tool(name: str, args: dict) -> str:
-        if name == "find_actors":
+        if name == _FIND:
             return json.dumps({"returnValue": _actor_reply(args.get("glob", ""))})
-        elif name == "list_properties":
+        elif name == _LIST:
             actor_name = args.get("actor_name", "")
             prop_key = ""
             if "DirLight" in actor_name:
@@ -205,26 +208,22 @@ class TestBuildAtmosphereMapping:
         # ServerResult wraps CallToolResult in .root
         text = result.root.content[0].text
 
-        # ---- 验证 1: 使用短名，无前缀 ----
+        # ---- 验证 1: 使用完全限定名 ----
+        _FIND = "toolset_registry.toolsets.core.scene.SceneTools.find_actors"
+        _LIST = "toolset_registry.toolsets.core.object.ObjectTools.list_properties"
         tool_names = [
             c.args[0] for c in mock_ue_client.call_tool.mock_calls
         ]
-        assert "find_actors" in tool_names, (
-            f"find_actors 未被调用，实际调用: {tool_names}"
+        assert _FIND in tool_names, (
+            f"应使用完全限定名 {_FIND}，实际调用: {tool_names}"
         )
-        assert "list_properties" in tool_names, (
-            f"list_properties 未被调用，实际调用: {tool_names}"
-        )
-        assert "SceneTools.find_actors" not in tool_names, (
-            f"不应使用 SceneTools. 前缀，实际调用: {tool_names}"
-        )
-        assert "ObjectTools.list_properties" not in tool_names, (
-            f"不应使用 ObjectTools. 前缀，实际调用: {tool_names}"
+        assert _LIST in tool_names, (
+            f"应使用完全限定名 {_LIST}，实际调用: {tool_names}"
         )
 
         # ---- 验证 2: 每个氛围类型都调了 find_actors ----
         find_calls = [
-            c for c in tool_names if c == "find_actors"
+            c for c in tool_names if c == _FIND
         ]
         assert len(find_calls) == 5, (
             f"应对 5 种氛围类型各调一次 find_actors，实际 {len(find_calls)} 次"
@@ -232,7 +231,7 @@ class TestBuildAtmosphereMapping:
 
         # ---- 验证 3: 对有 Actor 的类型调了 list_properties ----
         list_calls = [
-            c for c in tool_names if c == "list_properties"
+            c for c in tool_names if c == _LIST
         ]
         # 4 种有 actor (DirectionalLight, SkyAtmosphere, Fog, Cloud)，1 种无 (PostProcessVolume)
         assert len(list_calls) == 4, (
@@ -321,10 +320,11 @@ class TestBuildAtmosphereMapping:
     ) -> None:
         """场景中无任何氛围组件时，返回空映射."""
         # 覆盖 mock：全部返回空
+        _FIND = "toolset_registry.toolsets.core.scene.SceneTools.find_actors"
         mock_ue_client.call_tool.side_effect = (
             lambda name, args: (
                 json.dumps({"returnValue": []})
-                if name == "find_actors"
+                if name == _FIND
                 else "{}"
             )
         )

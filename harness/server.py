@@ -757,7 +757,7 @@ def build_server(
             for actor_type in ATMOSPHERE_TYPES:
                 try:
                     result_text = await ue_client.call_tool(
-                        "find_actors",
+                        "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
                         {"glob": f"*{actor_type}*", "tag": ""},
                     )
                     parsed = _parse_raw_result(result_text)
@@ -788,7 +788,7 @@ def build_server(
                 for actor_name in actor_names[:1]:
                     try:
                         props_result = await ue_client.call_tool(
-                            "list_properties",
+                            "toolset_registry.toolsets.core.object.ObjectTools.list_properties",
                             {"actor_name": actor_name},
                         )
                         props_parsed = _parse_raw_result(props_result)
