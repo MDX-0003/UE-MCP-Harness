@@ -361,23 +361,27 @@ class TestBuildAtmosphereMapping:
         assert "未找到" in text  # 所有组件都标记为未找到
 
 
+# 固定输出目录——测试生成物不参与 git，仅用于人工验收
+_OUTPUT_DIR = Path(__file__).parent / "output"
+
+
 class TestBuildAtmosphereMappingFileOutput:
     """验证 mapping.md 文件落盘."""
 
     @pytest.mark.asyncio
     async def test_writes_mapping_file(
         self, mock_ue_client: AsyncMock, mock_classify: MagicMock,
-        tmp_path: Path,
     ) -> None:
-        """验证 build_atmosphere_mapping 将 mapping.md 写入 log 目录."""
+        """验证 build_atmosphere_mapping 将 mapping.md 写入 tests/output/."""
         from harness.state.models import WorldState
         from harness.observability.snapshotter import SnapshotRecorder
 
+        _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         cache = WorldState()
-        recorder = SnapshotRecorder(snapshot_dir=tmp_path, cache=cache)
+        recorder = SnapshotRecorder(snapshot_dir=_OUTPUT_DIR, cache=cache)
 
         server = build_server(
-            config=Config(log_dir=tmp_path),
+            config=Config(log_dir=_OUTPUT_DIR),
             ue_client=mock_ue_client,
             interceptors=[DebugPreCallInterceptor()],
             skills_dir=Path("skills"),
@@ -411,9 +415,10 @@ class TestBuildAtmosphereMappingFileOutput:
         text = result.root.content[0].text
 
         # ---- 验证 1: mapping.md 文件已创建 ----
-        mapping_path = tmp_path / "atmosphere-mapping.md"
+        mapping_path = _OUTPUT_DIR / "atmosphere-mapping.md"
         assert mapping_path.exists(), (
-            f"mapping.md 未生成于 {tmp_path}，目录内容: {list(tmp_path.iterdir())}"
+            f"mapping.md 未生成于 {_OUTPUT_DIR}，"
+            f"目录内容: {list(_OUTPUT_DIR.iterdir())}"
         )
 
         # ---- 验证 2: 文件内容与 tool response 中的映射表一致 ----
