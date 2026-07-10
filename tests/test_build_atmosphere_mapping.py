@@ -33,17 +33,95 @@ def mock_ue_client() -> AsyncMock:
         }
         return actor_map.get(glob_val, [])
 
+    # 各组件类型的真实属性集（精简版，保留氛围相关 + 无关属性以验证 MiMo 筛选）
+    _component_properties: dict[str, str] = {
+        "DirLight": (
+            "shadowCascadeBiasDistribution: float\n"
+            "bEnableLightShaftOcclusion: bool\n"
+            "occlusionMaskDarkness: float\n"
+            "lightSourceAngle: float\n"
+            "lightSourceSoftAngle: float\n"
+            "dynamicShadowDistanceMovableLight: float\n"
+            "intensity: float\n"
+            "lightColor: FLinearColor\n"
+            "bUseTemperature: bool\n"
+            "temperature: float\n"
+            "bAtmosphereSunLight: bool\n"
+            "specularScale: float\n"
+            "indirectLightingIntensity: float\n"
+            "volumetricScatteringIntensity: float\n"
+        ),
+        "SkyAtmo": (
+            "transformMode: enum\n"
+            "bottomRadius: float\n"
+            "groundAlbedo: FLinearColor\n"
+            "atmosphereHeight: float\n"
+            "multiScatteringFactor: float\n"
+            "rayleighScatteringScale: float\n"
+            "rayleighScattering: FLinearColor\n"
+            "rayleighExponentialDistribution: float\n"
+            "mieScatteringScale: float\n"
+            "mieScattering: FLinearColor\n"
+            "mieAbsorptionScale: float\n"
+            "mieAbsorption: FLinearColor\n"
+            "mieAnisotropy: float\n"
+            "mieExponentialDistribution: float\n"
+            "skyLuminanceFactor: FLinearColor\n"
+            "aerialPespectiveViewDistanceScale: float\n"
+        ),
+        "Fog": (
+            "fogDensity: float\n"
+            "fogHeightFalloff: float\n"
+            "fogInscatteringLuminance: FLinearColor\n"
+            "skyAtmosphereAmbientContributionColorScale: FLinearColor\n"
+            "inscatteringColorCubemap: object\n"
+            "fullyDirectionalInscatteringColorDistance: float\n"
+            "nonDirectionalInscatteringColorDistance: float\n"
+            "directionalInscatteringExponent: float\n"
+            "directionalInscatteringStartDistance: float\n"
+            "directionalInscatteringLuminance: FLinearColor\n"
+            "fogMaxOpacity: float\n"
+            "startDistance: float\n"
+            "fogCutoffDistance: float\n"
+            "bEnableVolumetricFog: bool\n"
+        ),
+        "Cloud": (
+            "layerBottomAltitude: float\n"
+            "layerHeight: float\n"
+            "tracingStartMaxDistance: float\n"
+            "tracingMaxDistance: float\n"
+            "planetRadius: float\n"
+            "groundAlbedo: FLinearColor\n"
+            "material: object\n"
+            "bUsePerSampleAtmosphericLightTransmittance: bool\n"
+            "skyLightCloudBottomOcclusion: float\n"
+            "viewSampleCountScale: float\n"
+            "shadowViewSampleCountScale: float\n"
+            "shadowTracingDistance: float\n"
+            "stopTracingTransmittanceThreshold: float\n"
+        ),
+    }
+
     async def _mock_call_tool(name: str, args: dict) -> str:
         if name == "find_actors":
             return json.dumps({"returnValue": _actor_reply(args.get("glob", ""))})
         elif name == "list_properties":
+            actor_name = args.get("actor_name", "")
+            prop_key = ""
+            if "DirLight" in actor_name:
+                prop_key = "DirLight"
+            elif "SkyAtmo" in actor_name:
+                prop_key = "SkyAtmo"
+            elif "Fog" in actor_name:
+                prop_key = "Fog"
+            elif "Cloud" in actor_name:
+                prop_key = "Cloud"
+            props_text = _component_properties.get(
+                prop_key,
+                "LightColor: FLinearColor\nIntensity: float\nTemperature: float\n",
+            )
             return json.dumps({
-                "content": [{
-                    "type": "text",
-                    "text": ("LightColor: FLinearColor\n"
-                             "Intensity: float\n"
-                             "Temperature: float\n"),
-                }]
+                "content": [{"type": "text", "text": props_text}]
             })
         return "{}"
 
@@ -56,8 +134,28 @@ def mock_classify() -> MagicMock:
     """返回一个假的 VisionSubAgent.classify()，返回预设维度映射."""
     agent = MagicMock()
     agent.classify = AsyncMock(return_value={
-        "brightness": [{"actor_type": "DirectionalLight", "property": "Intensity"}],
-        "color_temp": [{"actor_type": "DirectionalLight", "property": "LightColor"}],
+        "brightness": [
+            {"actor_type": "DirectionalLight", "property": "Intensity"},
+            {"actor_type": "DirectionalLight", "property": "intensity"},
+        ],
+        "color_temp": [
+            {"actor_type": "DirectionalLight", "property": "LightColor"},
+            {"actor_type": "DirectionalLight", "property": "lightColor"},
+            {"actor_type": "DirectionalLight", "property": "temperature"},
+        ],
+        "shadow_direction": [
+            {"actor_type": "DirectionalLight", "property": "bAtmosphereSunLight"},
+        ],
+        "sky": [
+            {"actor_type": "SkyAtmosphere", "property": "skyLuminanceFactor"},
+            {"actor_type": "SkyAtmosphere", "property": "rayleighScattering"},
+        ],
+        "haze": [
+            {"actor_type": "ExponentialHeightFog", "property": "fogDensity"},
+        ],
+        "contrast": [
+            {"actor_type": "SkyAtmosphere", "property": "multiScatteringFactor"},
+        ],
     })
     return agent
 
@@ -144,17 +242,29 @@ class TestBuildAtmosphereMapping:
         # ---- 验证 4: MiMo classify() 被调用且 prompt 包含组件信息 ----
         assert mock_classify.classify.called, "MiMo classify() 未被调用"
         prompt = mock_classify.classify.call_args[0][0]
-        assert "DirectionalLight" in prompt, "prompt 应包含组件名"
-        assert "SkyAtmosphere" in prompt, "prompt 应包含组件名"
+        assert "DirectionalLight" in prompt, "prompt 应包含 DirectionalLight"
+        assert "SkyAtmosphere" in prompt, "prompt 应包含 SkyAtmosphere"
+        assert "ExponentialHeightFog" in prompt, "prompt 应包含 Fog"
+        assert "VolumetricCloud" in prompt, "prompt 应包含 Cloud"
+        assert "PostProcessVolume" in prompt, "prompt 应包含 PPV"
         assert "Intensity" in prompt, "prompt 应包含属性名"
-        assert "brightness" in prompt.lower(), "prompt 应包含维度名"
+        assert "fogDensity" in prompt, "prompt 应包含 fog 属性"
+        assert "brightness" in prompt.lower(), "prompt 应包含维度指导"
+        # prompt 应包含无关属性（collision/tick 类），验证 MiMo 的筛选职责
+        assert "bEnableLightShaftOcclusion" in prompt, (
+            "prompt 应包含无关属性以验证 MiMo 筛选"
+        )
 
         # ---- 验证 5: 返回体包含扫描摘要和映射表 ----
         assert "DirectionalLight: 1 个" in text, "扫描摘要应列出找到的组件"
         assert "PostProcessVolume: 未找到" in text, "应标记未找到的组件"
         assert "## 亮度 (Brightness)" in text, "映射表应包含维度章节"
-        assert "| DirectionalLight | Intensity |" in text, "映射表应包含属性行"
-        assert "2 个氛围相关属性" in text, "应显示属性计数"
+        assert "## 色温 (Color Temperature)" in text, "映射表应包含色温维度"
+        assert "## 大气密度 (Haze)" in text, "映射表应包含大气密度维度"
+        assert "| DirectionalLight |" in text, "映射表应包含 DirectionalLight 的属性"
+        assert "| ExponentialHeightFog |" in text, "映射表应包含 Fog 的属性"
+        assert "| SkyAtmosphere |" in text, "映射表应包含 SkyAtmosphere 的属性"
+        assert "氛围相关属性" in text, "应显示属性计数"
 
     @pytest.mark.asyncio
     async def test_fallback_on_mimo_failure(
@@ -200,9 +310,10 @@ class TestBuildAtmosphereMapping:
         text = result.root.content[0].text
         # 降级输出应以警告开头
         assert "MiMo 分类失败" in text, "应显示 MiMo 失败警告"
-        # 应包含原始属性名
-        assert "LightColor" in text, "降级输出应包含原始属性列表"
-        assert "Intensity" in text, "降级输出应包含原始属性列表"
+        # 应包含原始属性名（mock 数据定义为小写首字母）
+        assert "lightColor" in text, "降级输出应包含原始属性 lightColor"
+        assert "intensity" in text, "降级输出应包含原始属性 intensity"
+        assert "fogDensity" in text, "降级输出应包含 fogDensity"
 
     @pytest.mark.asyncio
     async def test_all_actors_empty_scenario(
@@ -309,9 +420,9 @@ class TestBuildAtmosphereMappingFileOutput:
         file_content = mapping_path.read_text(encoding="utf-8")
         assert "Atmosphere Mapping" in file_content
         assert "## 亮度 (Brightness)" in file_content
-        assert "| DirectionalLight | Intensity |" in file_content
-        # 文件内容应与 response 的映射表部分一致
-        assert "2 个氛围相关属性" in file_content
+        assert "## 色温 (Color Temperature)" in file_content
+        assert "| DirectionalLight |" in file_content
+        assert "氛围相关属性" in file_content
 
         # ---- 验证 3: tool response 包含文件路径 ----
         mapping_path_str = str(mapping_path)
