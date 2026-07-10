@@ -18,7 +18,9 @@
       "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\\\\class-name-persistence.md\" -Confirm:$false)",
       "PowerShell(Remove-Item \"e:\\\\Programs\\\\Epic Games\\\\UE Engine\\\\UE-MCP-Harness\\\\docs\\\\plans\" -Confirm:$false)",
       "Bash(ssh -vT git@github.com)",
-      "Bash(tasklist /FI \"IMAGENAME eq python.exe\")"
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\")",
+      "PowerShell(Get-Content \"$env:USERPROFILE\\\\.claude\\\\settings.json\" | Select-String -Pattern '\"model\"|\"effortLevel\"|\"context\"|\"maxToken\"|\"budget\"' -CaseSensitive:$false)",
+      "PowerShell($env:GIT_DIR = \"$env:USERPROFILE\\\\.claude\\\\.git\"; $env:GIT_WORK_TREE = \"$env:USERPROFILE\\\\.claude\"; git --git-dir=\"$env:USERPROFILE\\\\.claude\\\\.git\" --work-tree=\"$env:USERPROFILE\\\\.claude\" log --oneline --all -- settings.json 2>$null; if \\($LASTEXITCODE -ne 0\\) { Write-Output \"No git repo in .claude directory\" })"
     ],
     "additionalDirectories": [
       "C:\\Users\\Administrator\\.claude\\memory"
