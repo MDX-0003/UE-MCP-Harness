@@ -654,6 +654,14 @@ def build_server(
             else:
                 metrics_error = "当前截图无法解码为 PIL Image"
 
+            # 4b. 趋势对比（vs 上一次 match_reference 调用）
+            prev_metrics = _session_reference.get("prev_metrics")
+            trend_lines: list[str] = []
+            if prev_metrics is not None and metrics_result is not None:
+                trend_lines = _build_trend_summary(prev_metrics, metrics_result)
+            # 保存本次结果供下次对比
+            _session_reference["prev_metrics"] = metrics_result
+
             # 5. MiMo 8 维度双图对比
             question = (
                 "请从以下 8 个维度比较当前截图与参考图的差异。"
@@ -686,10 +694,13 @@ def build_server(
 
             lines = [
                 f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
-                "",
-                "MiMo 8 维度差异：",
-                verdict.answer,
             ]
+            if trend_lines:
+                lines.extend(trend_lines)
+            lines.append("")
+
+            lines.append("MiMo 8 维度差异：")
+            lines.append(verdict.answer)
 
             if metrics_result:
                 m = metrics_result
@@ -1139,6 +1150,76 @@ def _extract_property_names(parsed_text: str | None) -> list[str]:
             if not line.startswith("#") and len(line) < 100:
                 names.append(line)
     return names
+
+
+def _build_trend_summary(
+    prev: dict[str, Any], cur: dict[str, Any],
+) -> list[str]:
+    """生成指标趋势对比行（vs 上一次 match_reference 调用）。
+
+    Args:
+        prev: 上一次 match_reference 的 metrics 结果
+        cur: 当前 match_reference 的 metrics 结果
+
+    Returns:
+        渲染后的趋势行列表（含空行前缀）
+    """
+    REF_RB = prev.get("color_temperature", {}).get("ref_r_b_ratio")
+
+    def _arrow(prev_val: float, cur_val: float, target: float | None) -> str:
+        """判断当前值是否向目标收敛。"""
+        if target is None:
+            return ""
+        prev_dist = abs(prev_val - target)
+        cur_dist = abs(cur_val - target)
+        if cur_dist < prev_dist * 0.9:
+            return " ✓ 向参考值收敛"
+        if cur_dist > prev_dist * 1.1:
+            return " ✗ 远离参考值"
+        return " ≈ 无显著变化"
+
+    lines = [
+        "",
+        "📊 指标趋势（vs 上一次 match_reference）：",
+        f"{'':>14} {'上次':>8} {'本次':>8} {'变化':>10}  {'收敛方向':>12}",
+    ]
+
+    # R/B ratio
+    prev_rb = prev.get("color_temperature", {}).get("cur_r_b_ratio")
+    cur_rb = cur.get("color_temperature", {}).get("cur_r_b_ratio")
+    if prev_rb is not None and cur_rb is not None:
+        rb_delta = cur_rb - prev_rb
+        arrow = _arrow(prev_rb, cur_rb, REF_RB)
+        lines.append(
+            f"{'R/B 比值':>14} {prev_rb:>8.4f} {cur_rb:>8.4f}"
+            f" {rb_delta:>+10.4f} {arrow}"
+        )
+
+    # Luminance
+    prev_lum = prev.get("luminance", {}).get("cur")
+    cur_lum = cur.get("luminance", {}).get("cur")
+    ref_lum = prev.get("luminance", {}).get("ref")
+    if prev_lum is not None and cur_lum is not None:
+        lum_delta = cur_lum - prev_lum
+        arrow = _arrow(prev_lum, cur_lum, ref_lum)
+        lines.append(
+            f"{'亮度':>14} {prev_lum:>8.1f} {cur_lum:>8.1f}"
+            f" {lum_delta:>+10.1f} {arrow}"
+        )
+
+    # Saturation
+    prev_sat = prev.get("saturation", {}).get("cur")
+    cur_sat = cur.get("saturation", {}).get("cur")
+    ref_sat = prev.get("saturation", {}).get("ref")
+    if prev_sat is not None and cur_sat is not None:
+        sat_delta = cur_sat - prev_sat
+        arrow = _arrow(prev_sat, cur_sat, ref_sat)
+        lines.append(
+            f"{'饱和度':>14} {prev_sat:>8.1f} {cur_sat:>8.1f}"
+            f" {sat_delta:>+10.1f} {arrow}"
+        )
+
+    return lines
 
 
 def _render_mapping_markdown(mapping: dict[str, Any]) -> str:
