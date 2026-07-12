@@ -12,3 +12,4 @@
 - [L2 Readback returnValue Bug](l2-readback-returnvalue-bug.md) — returnValue 双层包装格式未被解析导致误报；修复方案与前后对比
 - [Reference Image Design 0708](reference-image-design-0708.md) — Issue 016 Part B 重新设计：3 工具 + Skill 重构 + Instructions 分离
 - [UE MCP Tool Naming](ue-mcp-tool-naming.md) — 完全限定名 vs 短名；Harness 直调 ue_client 必须用全名，不可依赖 allowlist 模式
+- [UE Tool Return Formats](ue-tool-return-formats.md) — MCP content + returnValue 两层包装不一致；list_properties 格式漂移；解析函数分层

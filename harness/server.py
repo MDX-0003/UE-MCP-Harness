@@ -1725,8 +1725,8 @@ async def _analyze_viewpoint(
 _CAMERA_ALIGN_TOOLS: dict[str, str] = {
     "find_actors": "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
     "get_actor_bounds": "toolset_registry.toolsets.core.actor.ActorTools.get_actor_bounds",
-    "get_camera": "toolset_registry.EditorAppToolset.GetCameraTransform",
-    "set_camera": "toolset_registry.EditorAppToolset.SetCameraTransform",
+    "get_camera": "ToolsetRegistry.EditorAppToolset.GetCameraTransform",
+    "set_camera": "ToolsetRegistry.EditorAppToolset.SetCameraTransform",
 }
 
 

@@ -49,6 +49,19 @@ result_text = await ue_client.call_tool(
 2. 或直连 UE 的 8000 端口做 MCP 握手后调 `tools/list`
 3. **不要**凭 allowlist 中的短名模式（如 `"SceneTools."`）猜测——那是过滤模式，不是真实名字
 
+## UE MCP 工具的两层命名空间
+
+UE 的 MCP 工具分属两个不同的命名空间前缀：
+
+| 命名空间 | 示例 | 说明 |
+|---------|------|------|
+| `toolset_registry.toolsets.core.*` | `toolset_registry.toolsets.core.scene.SceneTools.find_actors` | Core toolsets（Scene/Actor/Object） |
+| `ToolsetRegistry.*` | `ToolsetRegistry.EditorAppToolset.SetCameraTransform` | 非 core 的 toolset registry 工具 |
+
+**容易踩的坑**：把 EditorAppToolset 写成 `toolset_registry.EditorAppToolset.*`（错误！）。正确形式是 `ToolsetRegistry.EditorAppToolset.*`，不带 `toolset_registry.` 前缀，也不带 `toolsets.` 中间段。
+
+**Why:** `match_reference` 的视角自动对齐代码中，`_CAMERA_ALIGN_TOOLS` 的 `set_camera` 和 `get_camera` 写成了 `toolset_registry.EditorAppToolset.*`，导致 UE 返回 "Unknown tool"。该路径此前因 pitch 阈值 30° 几乎从不触发，改为 15° 后才暴露（2026-07-12）。
+
 **Why:** 在 `build_atmosphere_mapping` 实现中连续两次犯错（先用了 `SceneTools.find_actors`，又改成了 `find_actors`），两次都返回 "Unknown tool"。直接探头 8000 端口才确认了完全限定格式。所有 Harness 主动调 UE 工具的 handler 代码都必须用完全限定名。
 
 **How to apply:** 写新的 Harness 自有工具 handler 时，如果需要内部调 `ue_client.call_tool()`：
