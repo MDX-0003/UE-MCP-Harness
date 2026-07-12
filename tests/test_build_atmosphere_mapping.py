@@ -102,34 +102,147 @@ def mock_ue_client() -> AsyncMock:
         ),
     }
 
+    # component refPath 映射（模拟 get_properties 解析 actor 的 component 指针字段）
+    _component_refpaths: dict[str, dict] = {
+        "DirLight": {
+            "directionalLightComponent": {"refPath": "/Game/DirLight.LightComponent0"},
+            "lightComponent": {"refPath": "/Game/DirLight.LightComponent0"},
+        },
+        "SkyAtmo": {
+            "skyAtmosphereComponent": {"refPath": "/Game/SkyAtmo.SkyAtmosphereComponent"},
+        },
+        "Fog": {
+            "component": {"refPath": "/Game/Fog.HeightFogComponent0"},
+        },
+        "Cloud": {
+            "volumetricCloudComponent": {"refPath": "/Game/Cloud.VolumetricCloudComponent"},
+        },
+    }
+
     _FIND = "toolset_registry.toolsets.core.scene.SceneTools.find_actors"
     _FIND_SHORT = "find_actors"
     _LIST = "toolset_registry.toolsets.core.object.ObjectTools.list_properties"
     _LIST_SHORT = "list_properties"
+    _GET = "toolset_registry.toolsets.core.object.ObjectTools.get_properties"
+    _GET_SHORT = "get_properties"
+
+    _COMPONENT_PROPS: dict[str, str] = {
+        "LightComponent0": (
+            "intensity: float\n"
+            "lightColor: FLinearColor\n"
+            "bUseTemperature: bool\n"
+            "temperature: float\n"
+            "bAtmosphereSunLight: bool\n"
+            "specularScale: float\n"
+            "indirectLightingIntensity: float\n"
+            "volumetricScatteringIntensity: float\n"
+            "shadowCascadeBiasDistribution: float\n"
+            "bEnableLightShaftOcclusion: bool\n"
+        ),
+        "SkyAtmosphereComponent": (
+            "transformMode: enum\n"
+            "bottomRadius: float\n"
+            "groundAlbedo: FLinearColor\n"
+            "atmosphereHeight: float\n"
+            "multiScatteringFactor: float\n"
+            "rayleighScatteringScale: float\n"
+            "rayleighScattering: FLinearColor\n"
+            "rayleighExponentialDistribution: float\n"
+            "mieScatteringScale: float\n"
+            "mieScattering: FLinearColor\n"
+            "mieAbsorptionScale: float\n"
+            "mieAbsorption: FLinearColor\n"
+            "mieAnisotropy: float\n"
+            "mieExponentialDistribution: float\n"
+            "skyLuminanceFactor: FLinearColor\n"
+            "aerialPespectiveViewDistanceScale: float\n"
+        ),
+        "HeightFogComponent0": (
+            "fogDensity: float\n"
+            "fogHeightFalloff: float\n"
+            "fogInscatteringLuminance: FLinearColor\n"
+            "skyAtmosphereAmbientContributionColorScale: FLinearColor\n"
+            "inscatteringColorCubemap: object\n"
+            "fullyDirectionalInscatteringColorDistance: float\n"
+            "nonDirectionalInscatteringColorDistance: float\n"
+            "directionalInscatteringExponent: float\n"
+            "directionalInscatteringStartDistance: float\n"
+            "directionalInscatteringLuminance: FLinearColor\n"
+            "fogMaxOpacity: float\n"
+            "startDistance: float\n"
+            "fogCutoffDistance: float\n"
+            "bEnableVolumetricFog: bool\n"
+        ),
+        "VolumetricCloudComponent": (
+            "layerBottomAltitude: float\n"
+            "layerHeight: float\n"
+            "tracingStartMaxDistance: float\n"
+            "tracingMaxDistance: float\n"
+            "planetRadius: float\n"
+            "groundAlbedo: FLinearColor\n"
+            "material: object\n"
+            "bUsePerSampleAtmosphericLightTransmittance: bool\n"
+            "skyLightCloudBottomOcclusion: float\n"
+            "viewSampleCountScale: float\n"
+            "shadowViewSampleCountScale: float\n"
+            "shadowTracingDistance: float\n"
+            "stopTracingTransmittanceThreshold: float\n"
+        ),
+    }
 
     async def _mock_call_tool(name: str, args: dict) -> str:
         if name in (_FIND, _FIND_SHORT):
             # 使用 actor_type (class refPath) 进行查找
             class_ref = args.get("actor_type", {}).get("refPath", "")
-            return json.dumps({"returnValue": _actor_reply(class_ref)})
-        elif name in (_LIST, _LIST_SHORT):
-            actor_name = args.get("actor_name", "")
+            inner = json.dumps({"returnValue": _actor_reply(class_ref)})
+            return json.dumps({"content": [{"type": "text", "text": inner}]})
+        elif name in (_GET, _GET_SHORT):
+            # get_properties: 解析 component refPath 指针字段
+            instance = args.get("instance", {})
+            actor_path = instance.get("refPath", "") if isinstance(instance, dict) else str(instance)
             prop_key = ""
-            if "DirLight" in actor_name:
+            if "DirLight" in actor_path:
                 prop_key = "DirLight"
-            elif "SkyAtmo" in actor_name:
+            elif "SkyAtmo" in actor_path:
                 prop_key = "SkyAtmo"
-            elif "Fog" in actor_name:
+            elif "Fog" in actor_path:
                 prop_key = "Fog"
-            elif "Cloud" in actor_name:
+            elif "Cloud" in actor_path:
                 prop_key = "Cloud"
+            ref_data = _component_refpaths.get(prop_key, {})
+            inner = json.dumps({"returnValue": json.dumps(ref_data)})
+            return json.dumps({"content": [{"type": "text", "text": inner}]})
+        elif name in (_LIST, _LIST_SHORT):
+            instance = args.get("instance", {})
+            actor_path = instance.get("refPath", "") if isinstance(instance, dict) else str(instance)
+            prop_key = ""
+            # actor 级属性
+            if "DirLight" in actor_path and "LightComponent" not in actor_path:
+                prop_key = "DirLight"
+            elif "SkyAtmo" in actor_path and "SkyAtmosphereComponent" not in actor_path:
+                prop_key = "SkyAtmo"
+            elif "Fog" in actor_path and "HeightFogComponent" not in actor_path:
+                prop_key = "Fog"
+            elif "Cloud" in actor_path and "VolumetricCloudComponent" not in actor_path:
+                prop_key = "Cloud"
+            # component 级属性
+            elif "LightComponent" in actor_path:
+                props_text = _COMPONENT_PROPS.get("LightComponent0", "")
+                return json.dumps({"content": [{"type": "text", "text": props_text}]})
+            elif "SkyAtmosphereComponent" in actor_path:
+                props_text = _COMPONENT_PROPS.get("SkyAtmosphereComponent", "")
+                return json.dumps({"content": [{"type": "text", "text": props_text}]})
+            elif "HeightFogComponent" in actor_path:
+                props_text = _COMPONENT_PROPS.get("HeightFogComponent0", "")
+                return json.dumps({"content": [{"type": "text", "text": props_text}]})
+            elif "VolumetricCloudComponent" in actor_path:
+                props_text = _COMPONENT_PROPS.get("VolumetricCloudComponent", "")
+                return json.dumps({"content": [{"type": "text", "text": props_text}]})
             props_text = _component_properties.get(
                 prop_key,
                 "LightColor: FLinearColor\nIntensity: float\nTemperature: float\n",
             )
-            return json.dumps({
-                "content": [{"type": "text", "text": props_text}]
-            })
+            return json.dumps({"content": [{"type": "text", "text": props_text}]})
         return "{}"
 
     client.call_tool = AsyncMock(side_effect=_mock_call_tool)
