@@ -155,8 +155,8 @@ docs/
 - **Languages:** python (primary), , contract, dotenv, gitignore, go, image, json, markdown, mcp_config, pdf, text, toml, yaml
 - **Entry points:** `branch_mark\score.py`, `harness\cli.py`, `tests\test_l3_e2e.py`, `tests\tool_probe_ue.py`, `tests\tool_verify_asset_screenshot.py`, `tests\tool_verify_harness_passthrough.py`, `tests\tool_verify_harness_vision.py`, `tests\tool_verify_level_persistence.py`, `tests\tool_verify_ue_vision.py`
 - **Most-referenced symbols:** `Config` (50 usages), `harness.config.Config` (49 usages), `harness.interceptor.ToolCallCompleted` (46 usages), `ToolCallCompleted` (46 usages), `loads` (42 usages), `object` (34 usages), `WorldState` (31 usages), `harness.state.models.WorldState` (31 usages), `harness.state.normalize.normalize_tool_args` (30 usages), `mcp.types.TextContent` (26 usages)
-- **Graph size:** 3755 nodes, 10759 edges
-- **Breakdown:** 13 contracts, 494 docs, 144 files, 373 functions, 7 images, 335 imports, 421 methods, 267 modules, 546 params, 1 resources, 1 strings, 136 types, 1017 variables
+- **Graph size:** 4176 nodes, 11091 edges
+- **Breakdown:** 13 contracts, 511 docs, 232 files, 373 functions, 37 images, 335 imports, 421 methods, 267 modules, 546 params, 4 resources, 1 strings, 136 types, 1300 variables
 
 ## MANDATORY: Use Gortex MCP tools instead of Read/Grep/Glob
 
@@ -167,19 +167,6 @@ Gortex is running as an MCP server. You **MUST** prefer graph queries over file 
 The mandate above stands — but graph queries *narrow scope*, they do not *replace reading the implementation*. The graph tells you **where** the logic lives and **what** connects to it; the source tells you **how** it behaves. For the symbol you are about to change or depend on, read its full body with `get_symbol_source` — do not act on a one-line summary alone.
 
 Be especially deliberate with **behavior-critical code** — database migrations, retry / fallback / error-recovery paths, compatibility shims, concurrency-sensitive sections, and the tests that pin them. For these, call `get_symbol_source` and read the real implementation; never pass `compress_bodies:true`, which elides exactly the branches that carry the risk. Reserve compressed bodies and graph summaries for breadth (surveying many symbols); use full source for the few you are about to commit to.
-
-### GCX1 ID escaping: `\\` → `\`
-
-When `search_symbols` returns results in `format:"gcx"` (the default), Windows path separators appear as `\\` — this is the GCX1 wire-format escaping. **Pass single `\` to `get_symbol_source`, `find_usages`, etc.**, not the literal `\\` from the search result.
-
-```
-# search_symbols returns:  harness\\interceptor.py::ToolCallInterceptor
-#                                          ^^ escaped
-# get_symbol_source expects:  harness\interceptor.py::ToolCallInterceptor
-#                                         ^ single
-```
-
-Copying the `\\` verbatim causes `symbol not found`. Strip one level of escaping when passing IDs between Gortex tools.
 
 ## Required workflow (every task on this repo)
 
@@ -202,23 +189,24 @@ These are not suggestions — run each step at the trigger.
 | 2 Dirs Post Call | 105 symbols | `/gortex-2-dirs-post-call` |
 | 4 Dirs Harness State Models Worldstate | 93 symbols | `/gortex-4-dirs-harness-state-models-worldstate` |
 | 3 Dirs Skillregistry | 83 symbols | `/gortex-3-dirs-skillregistry` |
+| 2 Dirs Harness State Normalize Normali | 73 symbols | `/gortex-2-dirs-harness-state-normalize-normali` |
 | 4 Dirs Harness Config Config | 71 symbols | `/gortex-4-dirs-harness-config-config` |
-| 2 Dirs Harness State Normalize Normali | 71 symbols | `/gortex-2-dirs-harness-state-normalize-normali` |
 | 3 Dirs Build Server | 70 symbols | `/gortex-3-dirs-build-server` |
 | 2 Dirs Post Call External Call Dep Harness Observability Snapshotter | 56 symbols | `/gortex-2-dirs-post-call-external-call-dep-harness-observability-snapshotter` |
 | 3 Dirs Rpc | 55 symbols | `/gortex-3-dirs-rpc` |
 | 2 Dirs Check | 53 symbols | `/gortex-2-dirs-check` |
 | 3 Dirs Now | 41 symbols | `/gortex-3-dirs-now` |
-| 2 Dirs Parse Screenshot | 34 symbols | `/gortex-2-dirs-parse-screenshot` |
+| 3 Dirs Parse Screenshot | 39 symbols | `/gortex-3-dirs-parse-screenshot` |
 | 4 Dirs Loads | 34 symbols | `/gortex-4-dirs-loads` |
 | 4 Dirs Stop | 33 symbols | `/gortex-4-dirs-stop` |
-| 1 Dirs Harness Verification Capturer C | 31 symbols | `/gortex-1-dirs-harness-verification-capturer-c` |
 | 2 Dirs Capture | 31 symbols | `/gortex-2-dirs-capture` |
 | Tests 2 Dirs | 31 symbols | `/gortex-tests-2-dirs` |
+| 1 Dirs Harness Verification Capturer C | 31 symbols | `/gortex-1-dirs-harness-verification-capturer-c` |
 | 3 Dirs Cmd Start | 28 symbols | `/gortex-3-dirs-cmd-start` |
 | 2 Dirs Main | 25 symbols | `/gortex-2-dirs-main` |
 | Harness Observability 1 Dirs | 24 symbols | `/gortex-harness-observability-1-dirs` |
-| 2 Dirs Pre Call | 24 symbols | `/gortex-2-dirs-pre-call` |
+| 1 Dirs Score Jsonl | 24 symbols | `/gortex-1-dirs-score-jsonl` |
 <!-- gortex:skills:end -->
 
 <!-- gortex:communities:end -->
+
