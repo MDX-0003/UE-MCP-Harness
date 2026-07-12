@@ -403,7 +403,7 @@ def _diff_values(
     if short == "set_actor_transform":
         mismatches.extend(_diff_transform(intent, actual, epsilon))
     elif short == "set_properties":
-        mismatches.extend(_diff_properties(intent, actual))
+        mismatches.extend(_diff_properties(intent, actual, epsilon))
 
     return mismatches
 
@@ -436,35 +436,52 @@ def _diff_transform(intent: dict, actual: dict, epsilon: float) -> list[str]:
     return mismatches
 
 
-def _diff_properties(intent: dict, actual: dict) -> list[str]:
-    """按属性名逐一比较。嵌套 dict 递归只比对 intent 中的 key。"""
+def _diff_properties(intent: dict, actual: dict, epsilon: float = 1e-6) -> list[str]:
+    """按属性名递归比较，数值使用 epsilon 容差.
+
+    支持任意深度嵌套 dict。处理 UE FLinearColor 精度往返
+    （0.88 → 0.878431，需 epsilon >= 5e-3）。
+    """
     mismatches: list[str] = []
     for key, intent_val in intent.items():
         if key not in actual:
             mismatches.append(f"{key} 读回结果中缺失")
             continue
         actual_val = actual[key]
-        # 嵌套 dict: 递归比较子集
+        # 嵌套 dict: 递归比较
         if isinstance(intent_val, dict) and isinstance(actual_val, dict):
-            for sub_key, sub_intent in intent_val.items():
-                if sub_key not in actual_val:
-                    mismatches.append(f"{key}.{sub_key} 读回结果中缺失")
-                    continue
-                sub_actual = actual_val[sub_key]
-                if not _values_equal(sub_intent, sub_actual):
-                    mismatches.append(
-                        f"{key}.{sub_key} 意图={sub_intent} 实际={sub_actual}"
-                    )
+            sub_mismatches = _diff_properties(intent_val, actual_val, epsilon)
+            for sm in sub_mismatches:
+                mismatches.append(f"{key}.{sm}")
             continue
-        if not _values_equal(intent_val, actual_val):
+        # 嵌套 list: 逐元素比较
+        if isinstance(intent_val, list) and isinstance(actual_val, list):
+            if len(intent_val) != len(actual_val):
+                mismatches.append(
+                    f"{key} 意图长度={len(intent_val)} 实际长度={len(actual_val)}"
+                )
+                continue
+            for i, (iv, av) in enumerate(zip(intent_val, actual_val)):
+                if isinstance(iv, dict) and isinstance(av, dict):
+                    sub = _diff_properties(iv, av, epsilon)
+                    for sm in sub:
+                        mismatches.append(f"{key}[{i}].{sm}")
+                elif not _values_equal(iv, av, epsilon):
+                    mismatches.append(f"{key}[{i}] 意图={iv} 实际={av}")
+            continue
+        if not _values_equal(intent_val, actual_val, epsilon):
             mismatches.append(f"{key} 意图={intent_val} 实际={actual_val}")
     return mismatches
 
 
-def _values_equal(intent_val: object, actual_val: object) -> bool:
-    """比较两个值是否等价（数值容差 1e-6，字符串精确）。"""
+def _values_equal(intent_val: object, actual_val: object, epsilon: float = 1e-6) -> bool:
+    """比较两个值是否等价（数值使用 epsilon 容差，字符串精确）。
+
+    意图值 2.0 (float) 与实际值 2 (int) 通过 float 转换比较。
+    意图值 0.88 与实际值 0.878431 (UE FLinearColor 精度损失) 在 epsilon=5e-3 下通过。
+    """
     try:
-        if abs(float(intent_val) - float(actual_val)) <= 1e-6:
+        if abs(float(intent_val) - float(actual_val)) <= epsilon:
             return True
         return False
     except (ValueError, TypeError):
