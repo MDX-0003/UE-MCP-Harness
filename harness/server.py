@@ -656,7 +656,7 @@ def build_server(
                     "视角偏差: ref=%.0f cur=%.0f diff=%.0f",
                     ref_view["pitch"], cur_view["pitch"], pitch_diff,
                 )
-                if pitch_diff > 30:
+                if pitch_diff > 15:
                     try:
                         landscape_z = await _get_landscape_z(ue_client)
                     except Exception:
@@ -859,7 +859,6 @@ def build_server(
             # Step 1: 扫描 5 类组件
             scan_lines: list[str] = []
             actors_found: dict[str, list[str]] = {}
-            all_properties: dict[str, dict[str, list[str]]] = {}
 
             for actor_type, class_path in ATMOSPHERE_TYPES.items():
                 try:
@@ -898,11 +897,13 @@ def build_server(
                     f"如需创建，使用 add_to_scene_from_class。"
                 )
 
-            # Step 2: 获取属性名（含 component 子对象递归）
+            # Step 2: 构建属性索引（含 component 子对象递归 + refPath 溯源）
+            property_index: list[dict] = []
+            next_idx = 1
+
             for actor_type, actor_names in actors_found.items():
                 if not actor_names:
                     continue
-                all_properties[actor_type] = {}
                 for actor_name in actor_names[:1]:
                     try:
                         # 2a. 获取 actor 顶层属性名
@@ -917,93 +918,58 @@ def build_server(
                         actor_prop_names = _extract_property_names(props_text)
 
                         # 2b. 解析 component 引用，递归获取 component 级属性
-                        all_names = await _resolve_component_properties(
-                            ue_client, actor_name, actor_prop_names,
-                        )
+                        direct_props, component_refs, comp_prop_names = \
+                            await _resolve_component_properties(
+                                ue_client, actor_name, actor_prop_names,
+                            )
 
-                        all_properties[actor_type][actor_name] = all_names
+                        # 2c. 构建索引条目（component 指针字段被其子属性替换）
+                        entries, next_idx = _build_property_index(
+                            actor_type=actor_type,
+                            actor_name=actor_name,
+                            actor_prop_names=actor_prop_names,
+                            component_refs=component_refs,
+                            comp_prop_names=comp_prop_names,
+                            start_index=next_idx,
+                        )
+                        property_index.extend(entries)
                     except Exception as e:
                         logger.warning(
                             "获取 %s 属性列表失败: %s", actor_name, e,
                         )
-                        all_properties[actor_type][actor_name] = []
 
-            # Step 3: 组装 MiMo 分类 prompt
-            prompt_parts = [
-                "以下是从 UE 场景中提取的 5 类氛围组件及其所有属性名。",
-                "请筛选与氛围视觉表现相关的属性（排除碰撞、Tick、调试等无关属性）。",
-                "对每个属性标注其影响的高维维度：",
-                "brightness / contrast / color_temp / color_cast / saturation "
-                "/ haze / shadow_direction / sky。",
-                "",
-            ]
-            for actor_type in ATMOSPHERE_TYPES:
-                props = all_properties.get(actor_type, {})
-                if not props:
-                    prompt_parts.append(
-                        f"### {actor_type}: (场景中未找到此组件)"
-                    )
-                    continue
-                for actor_name, prop_names in props.items():
-                    prompt_parts.append(f"### {actor_type} ({actor_name})")
-                    if prop_names:
-                        for p in prop_names:
-                            prompt_parts.append(f"  - {p}")
-                    else:
-                        prompt_parts.append("  (获取属性失败)")
-                    prompt_parts.append("")
+            # Step 3: 组装 MiMo 分类 prompt（索引模式——MiMo 只输出整数）
+            prompt = _build_mimo_prompt(property_index)
 
-            prompt_parts.append(
-                "输出 JSON，格式如下"
-                "（一个属性可标注多个维度，空维度输出空数组）："
-            )
-            prompt_parts.append(json.dumps({
-                "brightness": [
-                    {"actor_type": "DirectionalLight", "property": "Intensity"},
-                ],
-                "color_temp": [
-                    {
-                        "actor_type": "DirectionalLight",
-                        "property": "LightColor",
-                    },
-                    {
-                        "actor_type": "PostProcessVolume",
-                        "property": "WhiteBalance",
-                    },
-                ],
-            }, indent=2, ensure_ascii=False))
-            prompt_parts.append("")
-            prompt_parts.append("只输出 JSON，不要有其他文字。")
-
-            prompt = "\n".join(prompt_parts)
-
-            # Step 4: MiMo 分类
+            # Step 4: MiMo 分类 + 索引解析
             agent = VisionSubAgent(config)
             try:
-                mapping = await agent.classify(prompt)
+                mimo_output = await agent.classify(prompt)
+                mapping = _resolve_mimo_indices(mimo_output, property_index)
             except ValueError as e:
                 duration_ms = (time.monotonic() - t0) * 1000
                 err_text = f"MiMo 分类失败: {e}"
-                # 降级：返回原始属性列表
+                # 降级：返回原始属性索引列表（含 refPath 标注）
                 fallback_lines = [
-                    "⚠ MiMo 分类失败，以下是 5 类组件的原始属性列表。",
+                    "⚠ MiMo 分类失败，以下是原始属性索引列表。",
                     "请 LLM 自行筛选氛围相关属性并调整。",
                     "",
+                    "| 索引 | 组件 | 属性位置 (refPath) | 属性 |",
+                    "|------|------|-------------------|------|",
                 ]
-                for actor_type in ATMOSPHERE_TYPES:
-                    props = all_properties.get(actor_type, {})
-                    if not props:
-                        continue
-                    for actor_name, prop_names in props.items():
-                        fallback_lines.append(
-                            f"## {actor_type} ({actor_name})"
-                        )
-                        for p in prop_names:
-                            fallback_lines.append(f"  - {p}")
-                        fallback_lines.append("")
+                for entry in property_index:
+                    short_ref = (
+                        entry["refPath"].split(":")[-1]
+                        if ":" in entry["refPath"]
+                        else entry["refPath"]
+                    )
+                    fallback_lines.append(
+                        f"| {entry['index']} | {entry['actor_type']} "
+                        f"| `{short_ref}` | {entry['property']} |"
+                    )
                 await _log_harness_call(
                     name, arguments,
-                    f"MiMo 失败，返回原始属性列表 ({err_text})",
+                    f"MiMo 失败，返回原始属性索引列表 ({err_text})",
                     duration_ms, error=e,
                 )
                 return CallToolResult(content=[TextContent(
@@ -1338,7 +1304,7 @@ async def _resolve_component_properties(
     ue_client: "McpClientSession",
     actor_path: str,
     actor_prop_names: list[str],
-) -> list[str]:
+) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
     """从 actor 属性中识别 component 引用字段，递归获取 component 级属性名.
 
     UE 的 Actor-Component 关系是两层结构：
@@ -1349,7 +1315,10 @@ async def _resolve_component_properties(
     再对每个 component 调 list_properties 获取属性名。
 
     Returns:
-        合并后的属性名列表：actor 直接属性 + 所有 component 的属性。
+        (direct_props, component_refs, comp_prop_names)
+        - direct_props: actor 直接属性名列表（不含 component 指针字段）
+        - component_refs: {field_name: component_refpath}
+        - comp_prop_names: {field_name: [prop_name, ...]}
     """
     # 疑似 component 引用字段
     suspect_fields = [
@@ -1357,7 +1326,7 @@ async def _resolve_component_properties(
         if p.endswith("Component") or "Component" in p
     ]
     if not suspect_fields:
-        return actor_prop_names
+        return (actor_prop_names, {}, {})
 
     # 调 get_properties 解析这些字段的实际值（refPath）
     try:
@@ -1369,10 +1338,10 @@ async def _resolve_component_properties(
         text = _extract_parsed_text(parsed, result_text) or ""
         rv = _try_unwrap_return_value(text)
     except Exception:
-        return actor_prop_names
+        return (actor_prop_names, {}, {})
 
     if rv is None:
-        return actor_prop_names
+        return (actor_prop_names, {}, {})
 
     # 分离 component refPath vs 普通属性
     component_refs: dict[str, str] = {}
@@ -1387,8 +1356,8 @@ async def _resolve_component_properties(
         direct_props.append(name)
 
     # 递归获取 component 属性名
-    all_names = list(direct_props)
-    for _comp_field, comp_refpath in component_refs.items():
+    comp_prop_names: dict[str, list[str]] = {}
+    for comp_field, comp_refpath in component_refs.items():
         try:
             comp_result = await ue_client.call_tool(
                 "toolset_registry.toolsets.core.object.ObjectTools.list_properties",
@@ -1397,13 +1366,14 @@ async def _resolve_component_properties(
             comp_parsed = _parse_raw_result(comp_result)
             comp_text = _extract_parsed_text(comp_parsed, comp_result)
             comp_names = _extract_property_names(comp_text)
-            all_names.extend(comp_names)
+            comp_prop_names[comp_field] = comp_names
         except Exception as e:
             logger.warning(
                 "获取 component %s 属性失败: %s", comp_refpath, e,
             )
+            comp_prop_names[comp_field] = []
 
-    return all_names
+    return (direct_props, component_refs, comp_prop_names)
 
 
 def _try_unwrap_return_value(text: str) -> dict | None:
@@ -1427,6 +1397,160 @@ def _try_unwrap_return_value(text: str) -> dict | None:
         if isinstance(rv, dict):
             return rv
     return None
+
+
+def _build_property_index(
+    actor_type: str,
+    actor_name: str,
+    actor_prop_names: list[str],
+    component_refs: dict[str, str],
+    comp_prop_names: dict[str, list[str]],
+    start_index: int,
+) -> tuple[list[dict], int]:
+    """Build a flat property index with full provenance for MiMo classification.
+
+    Each entry records:
+      - index: sequential integer (1-based, for MiMo to reference)
+      - actor_type: e.g. "DirectionalLight"
+      - actor_name: actor refPath
+      - refPath: where this property actually lives (actor or component refPath)
+      - property: exact UE property name (preserved from list_properties)
+
+    Actor-level props get refPath = actor_name.
+    Component pointer fields are NOT emitted — their child properties replace them.
+    Component-level props get refPath = component_refs[comp_field].
+
+    Args:
+        actor_type: Atmosphere component type name.
+        actor_name: Actor refPath string.
+        actor_prop_names: All property names from actor-level list_properties.
+        component_refs: {field_name: component_refpath} mapping.
+        comp_prop_names: {field_name: [prop_names]} from component list_properties.
+        start_index: Starting index number (1-based).
+
+    Returns:
+        (index_entries, next_index) — list of entry dicts and the next free index.
+    """
+    entries: list[dict] = []
+    idx = start_index
+
+    for prop in actor_prop_names:
+        if prop in component_refs:
+            comp_path = component_refs[prop]
+            for cprop in comp_prop_names.get(prop, []):
+                entries.append({
+                    "index": idx,
+                    "actor_type": actor_type,
+                    "actor_name": actor_name,
+                    "refPath": comp_path,
+                    "property": cprop,
+                })
+                idx += 1
+        else:
+            entries.append({
+                "index": idx,
+                "actor_type": actor_type,
+                "actor_name": actor_name,
+                "refPath": actor_name,
+                "property": prop,
+            })
+            idx += 1
+
+    return entries, idx
+
+
+def _build_mimo_prompt(property_index: list[dict]) -> str:
+    """Build the MiMo classification prompt using integer property indices.
+
+    MiMo outputs ONLY integer indices, not property names.
+    Harness resolves indices back to exact UE property names afterward.
+    """
+    from collections import defaultdict
+
+    by_actor: dict[str, list[dict]] = defaultdict(list)
+    for entry in property_index:
+        by_actor[entry["actor_name"]].append(entry)
+
+    prompt_parts = [
+        "以下是从 UE 场景中提取的氛围组件属性，每个属性有一个索引编号 [N]。",
+        "请筛选与氛围视觉表现相关的属性（排除碰撞、Tick、调试等无关属性）。",
+        "对每个相关属性的**索引编号**标注其影响的维度：",
+        "brightness / contrast / color_temp / color_cast / saturation "
+        "/ haze / shadow_direction / sky。",
+        "",
+        "## 属性索引",
+        "",
+    ]
+
+    for actor_name, entries in by_actor.items():
+        actor_type = entries[0]["actor_type"]
+        prompt_parts.append(f"### {actor_type} ({actor_name})")
+        for e in entries:
+            if e["refPath"] == e["actor_name"]:
+                level_hint = ""
+            else:
+                comp_tail = e["refPath"].split(".")[-1] if "." in e["refPath"] else ""
+                level_hint = f"  (component: {comp_tail})" if comp_tail else ""
+            prompt_parts.append(f"  [{e['index']}] {e['property']}{level_hint}")
+        prompt_parts.append("")
+
+    prompt_parts.append(
+        "输出格式：一个 JSON 对象，key 为维度名，value 为相关属性的**索引编号数组**。"
+        "一个索引可出现在多个维度中。不相关的属性不出现在任何维度中。"
+    )
+    prompt_parts.append("示例：")
+    prompt_parts.append(json.dumps({
+        "brightness": [3],
+        "color_temp": [3, 4],
+        "haze": [7, 8],
+    }, indent=2, ensure_ascii=False))
+    prompt_parts.append("")
+    prompt_parts.append("只输出 JSON，不要有其他文字。")
+
+    return "\n".join(prompt_parts)
+
+
+def _resolve_mimo_indices(
+    mimo_output: dict[str, list],
+    property_index: list[dict],
+) -> dict[str, list[dict]]:
+    """Resolve MiMo's integer indices back to full property entries.
+
+    Args:
+        mimo_output: {"brightness": [1, 3], "color_temp": [2], ...}
+        property_index: List of {index, actor_type, actor_name, refPath, property}
+
+    Returns:
+        {"brightness": [{actor_type, actor_name, refPath, property}, ...], ...}
+        Dimensions with no valid entries are omitted.
+        Invalid indices (out of range, non-integer) are silently dropped.
+    """
+    lookup: dict[int, dict] = {}
+    for entry in property_index:
+        lookup[entry["index"]] = entry
+
+    result: dict[str, list[dict]] = {}
+    for dim, raw_indices in mimo_output.items():
+        if not isinstance(raw_indices, list):
+            continue
+        resolved: list[dict] = []
+        for raw in raw_indices:
+            try:
+                idx = int(raw)
+            except (ValueError, TypeError):
+                continue
+            entry = lookup.get(idx)
+            if entry is not None:
+                resolved.append({
+                    "actor_type": entry["actor_type"],
+                    "actor_name": entry["actor_name"],
+                    "refPath": entry["refPath"],
+                    "property": entry["property"],
+                })
+        if resolved:
+            result[dim] = resolved
+
+    return result
 
 
 def _build_trend_summary(
@@ -1601,10 +1725,10 @@ def _render_mapping_markdown(mapping: dict[str, Any]) -> str:
     """将维度分组映射 dict 转为 Markdown 表格.
 
     Args:
-        mapping: {"brightness": [{actor_type, property}, ...], ...}
+        mapping: {"brightness": [{actor_type, refPath, property}, ...], ...}
 
     Returns:
-        渲染后的 Markdown 文本
+        渲染后的 Markdown 文本（含属性位置列用于标注 actor/component 层级）
     """
     DIM_LABELS: dict[str, str] = {
         "brightness": "亮度 (Brightness)",
@@ -1627,15 +1751,17 @@ def _render_mapping_markdown(mapping: dict[str, Any]) -> str:
         total += len(props)
         lines.append(f"## {dim_label}")
         lines.append("")
-        lines.append("| 组件 | 属性 |")
-        lines.append("|------|------|")
+        lines.append("| 组件 | 属性位置 (refPath) | 属性 |")
+        lines.append("|------|-------------------|------|")
         for entry in props:
             if not isinstance(entry, dict):
                 continue
             actor_type = entry.get("actor_type", "")
+            ref_path = entry.get("refPath", "")
             prop = entry.get("property", "")
             if actor_type and prop:
-                lines.append(f"| {actor_type} | {prop} |")
+                short_ref = ref_path.split(":")[-1] if ":" in ref_path else ref_path
+                lines.append(f"| {actor_type} | `{short_ref}` | {prop} |")
         lines.append("")
 
     lines.insert(1, f"共 {total} 个氛围相关属性")

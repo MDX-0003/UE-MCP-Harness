@@ -1094,19 +1094,24 @@ class TestRenderMappingMarkdown:
         from harness.server import _render_mapping_markdown
         mapping = {
             "brightness": [
-                {"actor_type": "DirectionalLight", "property": "Intensity"},
-                {"actor_type": "SkyAtmosphere", "property": "SunIntensity"},
+                {"actor_type": "DirectionalLight", "refPath": "/Game/DL.LC0",
+                 "property": "Intensity"},
+                {"actor_type": "SkyAtmosphere", "refPath": "/Game/Sky.SC",
+                 "property": "SunIntensity"},
             ],
             "color_temp": [
-                {"actor_type": "DirectionalLight", "property": "LightColor"},
+                {"actor_type": "DirectionalLight", "refPath": "/Game/DL.LC0",
+                 "property": "LightColor"},
             ],
         }
         md = _render_mapping_markdown(mapping)
         assert "## 亮度 (Brightness)" in md
-        assert "| DirectionalLight | Intensity |" in md
-        assert "| SkyAtmosphere | SunIntensity |" in md
+        assert "| DirectionalLight |" in md
+        assert "Intensity" in md
+        assert "SunIntensity" in md
+        assert "DL.LC0" in md
         assert "## 色温 (Color Temperature)" in md
-        assert "| DirectionalLight | LightColor |" in md
+        assert "LightColor" in md
         assert "共 3 个氛围相关属性" in md
 
     def test_empty_dimension_skipped(self):

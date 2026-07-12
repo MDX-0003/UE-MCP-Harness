@@ -251,31 +251,19 @@ def mock_ue_client() -> AsyncMock:
 
 @pytest.fixture
 def mock_classify() -> MagicMock:
-    """返回一个假的 VisionSubAgent.classify()，返回预设维度映射."""
+    """返回一个假的 VisionSubAgent.classify()，返回基于索引的维度映射.
+
+    索引编号对应 mock_ue_client 中 _component_properties 的属性顺序：
+      DirLight(1-14) → SkyAtmo(15-30) → Fog(31-44) → Cloud(45-57)
+    """
     agent = MagicMock()
     agent.classify = AsyncMock(return_value={
-        "brightness": [
-            {"actor_type": "DirectionalLight", "property": "Intensity"},
-            {"actor_type": "DirectionalLight", "property": "intensity"},
-        ],
-        "color_temp": [
-            {"actor_type": "DirectionalLight", "property": "LightColor"},
-            {"actor_type": "DirectionalLight", "property": "lightColor"},
-            {"actor_type": "DirectionalLight", "property": "temperature"},
-        ],
-        "shadow_direction": [
-            {"actor_type": "DirectionalLight", "property": "bAtmosphereSunLight"},
-        ],
-        "sky": [
-            {"actor_type": "SkyAtmosphere", "property": "skyLuminanceFactor"},
-            {"actor_type": "SkyAtmosphere", "property": "rayleighScattering"},
-        ],
-        "haze": [
-            {"actor_type": "ExponentialHeightFog", "property": "fogDensity"},
-        ],
-        "contrast": [
-            {"actor_type": "SkyAtmosphere", "property": "multiScatteringFactor"},
-        ],
+        "brightness": [7],                      # intensity
+        "color_temp": [8, 10],                  # lightColor, temperature
+        "shadow_direction": [11],               # bAtmosphereSunLight
+        "sky": [21, 29],                        # rayleighScattering, skyLuminanceFactor
+        "haze": [31],                           # fogDensity
+        "contrast": [19],                       # multiScatteringFactor
     })
     return agent
 
@@ -362,11 +350,10 @@ class TestBuildAtmosphereMapping:
         assert "SkyAtmosphere" in prompt, "prompt 应包含 SkyAtmosphere"
         assert "ExponentialHeightFog" in prompt, "prompt 应包含 Fog"
         assert "VolumetricCloud" in prompt, "prompt 应包含 Cloud"
-        assert "PostProcessVolume" in prompt, "prompt 应包含 PPV"
-        assert "Intensity" in prompt, "prompt 应包含属性名"
-        assert "fogDensity" in prompt, "prompt 应包含 fog 属性"
+        assert "[7] intensity" in prompt, "prompt 应包含索引属性"
+        assert "[31] fogDensity" in prompt, "prompt 应包含 fog 属性"
         assert "brightness" in prompt.lower(), "prompt 应包含维度指导"
-        assert "bEnableLightShaftOcclusion" in prompt, (
+        assert "[2] bEnableLightShaftOcclusion" in prompt, (
             "prompt 应包含无关属性以验证 MiMo 筛选"
         )
         # ---- 验证 4b: 使用 actor_type 而非 glob ----
@@ -567,3 +554,196 @@ class TestBuildAtmosphereMappingFileOutput:
         # ---- 验证 4: SnapshotRecorder 记录了 mapping_path ----
         assert recorder._mapping_path is not None
         assert "atmosphere-mapping.md" in recorder._mapping_path
+
+
+# ============================================================
+# MiMo Index Pipeline Tests (Plan 2026-07-12)
+# ============================================================
+
+
+class TestBuildPropertyIndex:
+    """Task 1: _build_property_index structure and correctness."""
+
+    def test_build_property_index_structure(self):
+        """Each entry should carry index, actor_type, actor_name, refPath, property."""
+        from harness.server import _build_property_index
+
+        entries, next_idx = _build_property_index(
+            actor_type="DirectionalLight",
+            actor_name="/Game/DirLight",
+            actor_prop_names=["primaryActorTick", "bHidden", "lightComponent"],
+            component_refs={"lightComponent": "/Game/DirLight.LightComponent0"},
+            comp_prop_names={"lightComponent": ["intensity", "lightColor"]},
+            start_index=1,
+        )
+
+        assert len(entries) == 4, f"2 actor props + 2 component props = 4, got {len(entries)}"
+        assert next_idx == 5
+        # Actor-level props keep actor_name as refPath
+        assert entries[0] == {
+            "index": 1, "actor_type": "DirectionalLight",
+            "actor_name": "/Game/DirLight", "refPath": "/Game/DirLight",
+            "property": "primaryActorTick",
+        }
+        assert entries[1]["refPath"] == "/Game/DirLight"
+        # Component pointer field is NOT emitted; its children replace it
+        assert entries[2]["refPath"] == "/Game/DirLight.LightComponent0"
+        assert entries[2]["property"] == "intensity"
+        assert entries[3]["property"] == "lightColor"
+        # Index is sequential
+        assert [e["index"] for e in entries] == [1, 2, 3, 4]
+
+    def test_build_property_index_no_components(self):
+        """Actor with no component refs: all props get actor refPath."""
+        from harness.server import _build_property_index
+
+        entries, next_idx = _build_property_index(
+            actor_type="PostProcessVolume",
+            actor_name="/Game/PPV",
+            actor_prop_names=["settings", "bUnbound", "priority"],
+            component_refs={},
+            comp_prop_names={},
+            start_index=5,
+        )
+
+        assert len(entries) == 3
+        assert next_idx == 8
+        for e in entries:
+            assert e["refPath"] == "/Game/PPV", f"{e['property']} should have actor refPath"
+
+
+class TestBuildMimoPrompt:
+    """Task 2: _build_mimo_prompt format."""
+
+    def test_build_mimo_prompt_uses_indices(self):
+        """Prompt should use [N] notation and instruct MiMo to output integers."""
+        from harness.server import _build_mimo_prompt
+
+        entries = [
+            {"index": 1, "actor_type": "DirectionalLight", "actor_name": "/Game/DL",
+             "refPath": "/Game/DL", "property": "primaryActorTick"},
+            {"index": 2, "actor_type": "DirectionalLight", "actor_name": "/Game/DL",
+             "refPath": "/Game/DL.LightComponent0", "property": "intensity"},
+        ]
+
+        prompt = _build_mimo_prompt(entries)
+
+        assert "[1]" in prompt
+        assert "[2]" in prompt
+        assert "primaryActorTick" in prompt
+        assert "intensity" in prompt
+        # Must NOT ask for actor_type/property strings in output example
+        assert '"actor_type"' not in prompt
+        assert '"property"' not in prompt
+        # Must contain the 8 dimensions
+        assert "brightness" in prompt
+
+    def test_build_mimo_prompt_shows_component_hint(self):
+        """Component-level props should show which component they belong to."""
+        from harness.server import _build_mimo_prompt
+
+        entries = [
+            {"index": 1, "actor_type": "DirectionalLight", "actor_name": "/Game/DL",
+             "refPath": "/Game/DL.LightComponent0", "property": "intensity"},
+        ]
+
+        prompt = _build_mimo_prompt(entries)
+        # Should hint that this is on a component
+        assert "LightComponent0" in prompt
+
+
+class TestResolveMimoIndices:
+    """Task 3: _resolve_mimo_indices correctness and edge cases."""
+
+    def test_resolve_mimo_indices_normal(self):
+        """Valid indices should map back to correct property entries."""
+        from harness.server import _resolve_mimo_indices
+
+        property_index = [
+            {"index": 1, "actor_type": "DL", "actor_name": "/Game/DL",
+             "refPath": "/Game/DL.LC0", "property": "intensity"},
+            {"index": 2, "actor_type": "DL", "actor_name": "/Game/DL",
+             "refPath": "/Game/DL.LC0", "property": "lightColor"},
+            {"index": 3, "actor_type": "Sky", "actor_name": "/Game/Sky",
+             "refPath": "/Game/Sky.SC", "property": "rayleighScattering"},
+        ]
+
+        mimo_output = {"brightness": [1], "color_temp": [2, 3]}
+
+        result = _resolve_mimo_indices(mimo_output, property_index)
+
+        assert len(result["brightness"]) == 1
+        assert result["brightness"][0]["property"] == "intensity"
+        assert len(result["color_temp"]) == 2
+        assert result["color_temp"][1]["property"] == "rayleighScattering"
+
+    def test_resolve_mimo_indices_filters_invalid(self):
+        """Out-of-range and non-integer indices should be silently dropped."""
+        from harness.server import _resolve_mimo_indices
+
+        property_index = [
+            {"index": 1, "actor_type": "DL", "actor_name": "/Game/DL",
+             "refPath": "/Game/DL.LC0", "property": "intensity"},
+        ]
+
+        mimo_output = {"brightness": [1, 99], "contrast": ["abc", 0]}
+
+        result = _resolve_mimo_indices(mimo_output, property_index)
+
+        assert len(result["brightness"]) == 1
+        assert result["brightness"][0]["property"] == "intensity"
+        assert "contrast" not in result
+
+    def test_resolve_mimo_indices_empty_dimension_skipped(self):
+        """Dimensions with no valid indices should not appear in result."""
+        from harness.server import _resolve_mimo_indices
+
+        property_index = [
+            {"index": 1, "actor_type": "DL", "actor_name": "/Game/DL",
+             "refPath": "/Game/DL", "property": "bHidden"},
+        ]
+
+        mimo_output = {"brightness": [99], "haze": []}
+        result = _resolve_mimo_indices(mimo_output, property_index)
+
+        assert "brightness" not in result
+        assert "haze" not in result
+
+    def test_resolve_mimo_indices_value_types(self):
+        """Float indices (1.0) should work; string "1" should work."""
+        from harness.server import _resolve_mimo_indices
+
+        property_index = [
+            {"index": 1, "actor_type": "DL", "actor_name": "/Game/DL",
+             "refPath": "/Game/DL", "property": "intensity"},
+        ]
+
+        # JSON sometimes parses numbers as float
+        result = _resolve_mimo_indices({"brightness": [1.0]}, property_index)
+        assert len(result["brightness"]) == 1
+
+        # Or as string
+        result = _resolve_mimo_indices({"brightness": ["1"]}, property_index)
+        assert len(result["brightness"]) == 1
+
+
+class TestRenderMappingWithRefPath:
+    """Task 4: _render_mapping_markdown includes refPath column."""
+
+    def test_render_mapping_includes_refpath(self):
+        """Markdown table should include refPath column."""
+        from harness.server import _render_mapping_markdown
+
+        mapping = {
+            "brightness": [
+                {"actor_type": "DirectionalLight",
+                 "refPath": "/Game/DL.LightComponent0",
+                 "property": "intensity"},
+            ],
+        }
+
+        md = _render_mapping_markdown(mapping)
+
+        assert "属性位置" in md
+        assert "/Game/DL.LightComponent0" in md
+        assert "intensity" in md
