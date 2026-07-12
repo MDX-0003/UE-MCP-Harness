@@ -41,7 +41,12 @@ from harness.context.prompt import (
 from harness.context.provider import ContextProvider
 from harness.context.skill_registry import SkillRegistry
 from harness.interceptor import ToolCallCompleted
-from harness.verification.vision_agent import VisionSubAgent, _extract_json_object
+from harness.verification.vision_agent import (
+    VISION_SYSTEM_PROMPT,
+    VisionSubAgent,
+    _call_vision_api,
+    _extract_json_object,
+)
 from harness.verification.interceptor import _unwrap_return_value
 from harness.state.models import WorldState
 
@@ -1648,23 +1653,38 @@ _VIEWPOINT_PROMPT = (
 async def _analyze_viewpoint(
     config: Config, image_b64: str,
 ) -> "dict[str, float] | None":
-    """MiMo 单图视角分析，返回 {pitch, height_offset} 或 None."""
-    agent = VisionSubAgent(config)
+    """MiMo 单图视角分析，返回 {pitch, height_offset} 或 None.
+
+    直接调 _call_vision_api（不经 VisionSubAgent.check），
+    避免 _VISION_FORMAT_REMINDER 的标准 schema 与 _VIEWPOINT_PROMPT 的自定义
+    schema 冲突。_VIEWPOINT_PROMPT 末尾已自带 JSON 格式定义。
+    """
+    messages = [{
+        "role": "user",
+        "content": [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": image_b64,
+                },
+            },
+            {"type": "text", "text": _VIEWPOINT_PROMPT},
+        ],
+    }]
+
     try:
-        verdict = await agent.check(
-            image_b64,
-            question=_VIEWPOINT_PROMPT,
+        response = await _call_vision_api(
+            config, messages,
+            system=VISION_SYSTEM_PROMPT, temperature=0.7,
         )
     except Exception:
         return None
 
-    text = verdict.answer
-    # 防御：MiMo 可能将 answer 解析为嵌套 dict（如 {"answer": {"pitch": -25, ...}}）
-    if not isinstance(text, str):
-        text = json.dumps(text) if isinstance(text, dict) else str(text)
-    json_str = _extract_json_object(text)
+    json_str = _extract_json_object(response)
     if json_str is None:
-        logger.warning("视角分析未找到 JSON: %.100s", text)
+        logger.warning("视角分析未找到 JSON: %.100s", response[:200])
         return None
     try:
         result = json.loads(json_str)

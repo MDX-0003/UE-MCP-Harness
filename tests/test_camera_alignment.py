@@ -27,42 +27,39 @@ _SCREENSHOT = Screenshot(data_b64=_TINY_PNG_B64, width=10, height=10)
 
 @pytest.fixture
 def viewpoint_pitch_45() -> MagicMock:
-    """VisionSubAgent.check() → 参考图 pitch=-5, 当前截图 pitch=-55 (diff=50>30)."""
-    agent = MagicMock()
+    """_call_vision_api() → 参考图 pitch=-5, 当前截图 pitch=-55 (diff=50>30)."""
+    mock_api = MagicMock()
     count = [0]
 
-    async def _check(image_b64, question):
+    async def _call(config, messages, system="", temperature=None):
         count[0] += 1
-        result = MagicMock()
-        result.answer = (
+        return (
             '{"pitch": -5, "height_offset": 170}'
             if count[0] == 1
             else '{"pitch": -55, "height_offset": 3000}'
         )
-        return result
 
-    agent.check = _check
-    return agent
+    mock_api.side_effect = _call
+    return mock_api
 
 
 @pytest.fixture
 def viewpoint_pitch_5() -> MagicMock:
-    """VisionSubAgent.check() → diff=5 < 30, 不触发修正."""
-    agent = MagicMock()
+    """_call_vision_api() → diff=5 < 30, 不触发修正."""
+    mock_api = MagicMock()
     count = [0]
 
-    async def _check(image_b64, question):
+    async def _call(config, messages, system="", temperature=None):
         count[0] += 1
         result = MagicMock()
-        result.answer = (
+        return (
             '{"pitch": -15, "height_offset": 170}'
             if count[0] == 1
             else '{"pitch": -20, "height_offset": 200}'
         )
-        return result
 
-    agent.check = _check
-    return agent
+    mock_api.side_effect = _call
+    return mock_api
 
 
 @pytest.fixture
@@ -150,12 +147,10 @@ class TestCameraAlignment:
             session=MagicMock(), lifespan_context=None, request=req,
         )
 
-        # _analyze_viewpoint 用模块级 import → patch server module
-        # call_tool 内用本地 import → patch vision_agent module
-        # 注意: 两个 patch 各消耗自己的 side_effect 列表，不能共用
+        # _analyze_viewpoint 直接调 _call_vision_api → patch server module
+        # match_reference 内 compare_with_reference 走 VisionSubAgent → patch vision_agent
         with (
-            patch("harness.server.VisionSubAgent",
-                  side_effect=[viewpoint_pitch_45, viewpoint_pitch_45]),
+            patch("harness.server._call_vision_api", viewpoint_pitch_45),
             patch("harness.verification.vision_agent.VisionSubAgent",
                   return_value=compare_verdict),
             patch("harness.verification.capturer.capture",
@@ -230,8 +225,7 @@ class TestCameraAlignment:
         )
 
         with (
-            patch("harness.server.VisionSubAgent",
-                  side_effect=[viewpoint_pitch_5, viewpoint_pitch_5]),
+            patch("harness.server._call_vision_api", viewpoint_pitch_5),
             patch("harness.verification.vision_agent.VisionSubAgent",
                   return_value=compare_verdict),
             patch("harness.verification.capturer.capture",
