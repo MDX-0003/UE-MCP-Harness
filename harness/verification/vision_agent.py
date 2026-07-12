@@ -23,10 +23,16 @@ from harness.config import Config
 
 logger = logging.getLogger("harness.verification.vision_agent")
 
-# Vision Sub-Agent 的系统 prompt — 统一结构化输出
+# Vision Sub-Agent 的系统 prompt — 截图分析
 VISION_SYSTEM_PROMPT = """你是一个 Unreal Engine 编辑器截图分析器。
 分析截图内容，基于可见事实回答。判断灯光看被照亮表面，不看 gizmo 线框。
 如实报告，不迎合提问者。"""
+
+# MiMo 纯文本分类的 system prompt — 属性→维度归类
+VISION_CLASSIFY_PROMPT = """你是一个 UE 场景属性分类器。
+你的任务是将给定的属性索引按视觉维度归类。
+只输出整数索引数组，不编造属性名，不输出属性名字符串。
+严格遵守请求中的输出格式，不添加额外文字。"""
 
 # 追加到每条 user message 末尾的 JSON schema 定义
 # response_format 参数已强制 JSON 模式，此处只需定义字段语义
@@ -149,7 +155,10 @@ class VisionSubAgent:
         })
 
         try:
-            response = await _call_vision_api(self.config, messages)
+            response = await _call_vision_api(
+                self.config, messages,
+                system=VISION_SYSTEM_PROMPT, temperature=0.7,
+            )
 
             # 保存历史
             self._history.append(messages[-1])
@@ -179,7 +188,10 @@ class VisionSubAgent:
 
         messages = list(self._history)
         try:
-            response = await _call_vision_api(self.config, messages)
+            response = await _call_vision_api(
+                self.config, messages,
+                system=VISION_SYSTEM_PROMPT, temperature=0.7,
+            )
             self._history.append({"role": "assistant", "content": response})
             return _parse_verdict(response)
         except Exception as e:
@@ -214,7 +226,10 @@ class VisionSubAgent:
 
         messages = list(self._history)
         try:
-            response = await _call_vision_api(self.config, messages)
+            response = await _call_vision_api(
+                self.config, messages,
+                system=VISION_SYSTEM_PROMPT, temperature=0.7,
+            )
             self._history.append({"role": "assistant", "content": response})
             return _parse_verdict(response)
         except Exception as e:
@@ -272,7 +287,10 @@ class VisionSubAgent:
         ]
 
         try:
-            response = await _call_vision_api(self.config, messages)
+            response = await _call_vision_api(
+                self.config, messages,
+                system=VISION_SYSTEM_PROMPT, temperature=0.7,
+            )
             return _parse_verdict(response)
         except Exception as e:
             logger.error("Vision 双图对比失败: %s", e)
@@ -303,7 +321,10 @@ class VisionSubAgent:
         ]
 
         try:
-            response = await _call_vision_api(self.config, messages)
+            response = await _call_vision_api(
+                self.config, messages,
+                system=VISION_CLASSIFY_PROMPT, temperature=0,
+            )
         except Exception as e:
             raise ValueError(f"MiMo 纯文本调用失败: {e}") from e
 
@@ -339,12 +360,17 @@ class VisionSubAgent:
 async def _call_vision_api(
     config: Config,
     messages: list[dict],
+    system: str = "",
+    temperature: float | None = None,
 ) -> str:
-    """调用 Anthropic Claude Vision API。
+    """调用 Anthropic Claude API。
 
     Args:
         config: Harness 配置。
         messages: 消息历史。
+        system: system prompt 文本。空字符串时使用 VISION_SYSTEM_PROMPT 作为默认。
+        temperature: 模型 temperature。None 时不传参（使用模型默认值）。
+            classify() 应传 0（确定性分类），截图分析应传 0.7（保留适度灵活性）。
 
     如果未安装 anthropic SDK 或无 API key，返回 mock 响应用于测试。
     """
@@ -373,8 +399,8 @@ async def _call_vision_api(
         base_url=config.vision_api_base_url,
     )
 
-    # 统一 system prompt
-    system = VISION_SYSTEM_PROMPT
+    if not system:
+        system = VISION_SYSTEM_PROMPT
     anthropic_messages = []
     for msg in messages:
         role = msg["role"]
@@ -399,13 +425,19 @@ async def _call_vision_api(
             anthropic_messages.append({"role": role, "content": anthropic_content})
 
     import asyncio
+    create_kwargs: dict[str, Any] = {
+        "model": config.vision_model,
+        "max_tokens": 4096,
+        "system": system,
+        "messages": anthropic_messages,
+        "extra_body": {"response_format": {"type": "json_object"}},
+    }
+    if temperature is not None:
+        create_kwargs["temperature"] = temperature
+
     response = await asyncio.to_thread(
         client.messages.create,
-        model=config.vision_model,
-        max_tokens=4096,  # 新结构化格式(observations+中文)需要更多空间，2048 已验证不够
-        system=system,
-        messages=anthropic_messages,
-        extra_body={"response_format": {"type": "json_object"}},
+        **create_kwargs,
     )
 
     # 提取文本——跳过 thinking block（extended thinking 产物，非正文）

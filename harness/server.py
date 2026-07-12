@@ -1659,6 +1659,9 @@ async def _analyze_viewpoint(
         return None
 
     text = verdict.answer
+    # 防御：MiMo 可能将 answer 解析为嵌套 dict（如 {"answer": {"pitch": -25, ...}}）
+    if not isinstance(text, str):
+        text = json.dumps(text) if isinstance(text, dict) else str(text)
     json_str = _extract_json_object(text)
     if json_str is None:
         logger.warning("视角分析未找到 JSON: %.100s", text)
