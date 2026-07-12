@@ -1294,7 +1294,14 @@ def _extract_actor_names(parsed: Any) -> list[str]:
 
 
 def _extract_property_names(parsed_text: str | None) -> list[str]:
-    """从 list_properties 的返回文本中提取属性名列表."""
+    """从 list_properties 的返回文本中提取属性名列表.
+
+    处理两种 UE 返回格式：
+      1. 多行 name: type 格式（component 级 list_properties）:
+         "intensity: float\\nlightColor: FLinearColor\\n..."
+      2. 单行逗号分隔格式（actor 级 list_properties）:
+         "[75 fields] directionalLightComponent, lightComponent, bHidden, ..."
+    """
     if not parsed_text:
         return []
     names: list[str] = []
@@ -1302,6 +1309,7 @@ def _extract_property_names(parsed_text: str | None) -> list[str]:
         line = line.strip()
         if not line:
             continue
+        # 格式 1: "name: type" 或 "name (description)"
         for delim in (":", " ("):
             if delim in line:
                 name = line.split(delim)[0].strip()
@@ -1310,7 +1318,18 @@ def _extract_property_names(parsed_text: str | None) -> list[str]:
                     names.append(name)
                 break
         else:
-            if not line.startswith("#") and len(line) < 100:
+            # 格式 2: 逗号分隔 — "[N fields] a, b, c, ..."
+            if "," in line:
+                # 去掉 "[N fields]" 前缀
+                comma_part = line
+                if line.startswith("[") and "fields]" in line:
+                    bracket_end = line.index("fields]") + 7
+                    comma_part = line[bracket_end:].strip()
+                for part in comma_part.split(","):
+                    name = part.strip()
+                    if name and not name.startswith("#"):
+                        names.append(name)
+            elif not line.startswith("#") and len(line) < 100:
                 names.append(line)
     return names
 
