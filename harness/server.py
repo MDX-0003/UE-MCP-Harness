@@ -920,6 +920,8 @@ def build_server(
                         props_text = _extract_parsed_text(
                             props_parsed, props_result,
                         )
+                        # 解包可能的 returnValue 包装
+                        props_text = _unwrap_return_value_text(props_text or "")
                         actor_prop_names = _extract_property_names(props_text)
 
                         # 2b. 解析 component 引用，递归获取 component 级属性
@@ -1298,9 +1300,11 @@ def _extract_property_names(parsed_text: str | None) -> list[str]:
                     comma_part = line[bracket_end:].strip()
                 for part in comma_part.split(","):
                     name = part.strip()
-                    if name and not name.startswith("#"):
+                    if name and not name.startswith("#") \
+                            and not name.startswith("{"):
                         names.append(name)
-            elif not line.startswith("#") and len(line) < 100:
+            elif not line.startswith("#") and not line.startswith("{") \
+                    and len(line) < 100:
                 names.append(line)
     return names
 
@@ -1370,6 +1374,7 @@ async def _resolve_component_properties(
             )
             comp_parsed = _parse_raw_result(comp_result)
             comp_text = _extract_parsed_text(comp_parsed, comp_result)
+            comp_text = _unwrap_return_value_text(comp_text or "")
             comp_names = _extract_property_names(comp_text)
             comp_prop_names[comp_field] = comp_names
         except Exception as e:
@@ -1379,6 +1384,27 @@ async def _resolve_component_properties(
             comp_prop_names[comp_field] = []
 
     return (direct_props, component_refs, comp_prop_names)
+
+
+def _unwrap_return_value_text(text: str) -> str:
+    """If text is a ``{"returnValue": "..."}`` JSON wrapper, extract the inner value.
+
+    list_properties 返回值有两种格式：
+      1. 直接文本: ``"[75 fields] a, b, c"``
+      2. returnValue 包装: ``{"returnValue": "[75 fields] a, b, c"}``
+
+    此函数统一解包，返回内层字符串。
+    """
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+    if isinstance(parsed, dict) and "returnValue" in parsed:
+        rv = parsed["returnValue"]
+        if isinstance(rv, str):
+            return rv
+        return json.dumps(rv) if isinstance(rv, dict) else str(rv)
+    return text
 
 
 def _try_unwrap_return_value(text: str) -> dict | None:
