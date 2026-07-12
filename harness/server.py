@@ -86,6 +86,7 @@ def build_server(
     _cached_raw_tools: list[dict] = []
     # ---- 参考图会话状态（match_reference / vision_compare 共享） ----
     _session_reference: dict[str, Any] = {}
+    _session_mapping_generated: bool = False
     # ---- 005 Skill Registry ----
     _skills_dir = skills_dir if skills_dir is not None else (Path.home() / ".ue-harness" / "skills")
     skill_registry = SkillRegistry(skills_dir=_skills_dir)
@@ -336,7 +337,7 @@ def build_server(
           - vision_* :      Issue 015 Vision Session 工具
         """
 
-        nonlocal _session_reference
+        nonlocal _session_reference, _session_mapping_generated
 
         # 辅助：为 Harness 自有工具记录日志到 JSONL
         # 未经 UE 透传路径的工具需手动触发 ToolCallLogger
@@ -821,9 +822,18 @@ def build_server(
                 lines.append("MiMo 分析仍然有效。")
 
             lines.append("")
-            lines.append("下一步：如尚未生成参数映射，请调 build_atmosphere_mapping()。")
-            lines.append("完成后对照映射和差异调整各组件。交叉参考 MiMo 分析和量化指标——")
-            lines.append("两者一致则高置信，不一致则以 MiMo 为主、量化指标为参考修正。")
+            if not _session_mapping_generated:
+                lines.append(
+                    "下一步：请先调 build_atmosphere_mapping() 生成参数映射，"
+                    "再对照映射和差异调整各组件。"
+                )
+            else:
+                lines.append(
+                    "对照映射和差异调整各组件。交叉参考 MiMo 分析和量化指标——"
+                )
+                lines.append(
+                    "两者一致则高置信，不一致则以 MiMo 为主、量化指标为参考修正。"
+                )
 
             result_text = "\n".join(lines)
             await _log_harness_call(name, arguments, result_text, duration_ms)
@@ -871,29 +881,47 @@ def build_server(
                         )
                     else:
                         scan_lines.append(
-                            f"  {actor_type}: 未找到 → "
-                            f"请调 add_to_scene_from_class 创建"
+                            f"  {actor_type}: 未找到"
                         )
                 except Exception as e:
                     scan_lines.append(f"  {actor_type}: 查询失败 ({e})")
 
-            # Step 2: 获取属性名
+            # 缺失组件汇总提示（一次性，不给 LLM 逐个下达操作指令的机会）
+            missing_types = [
+                at for at, names in actors_found.items() if not names
+            ]
+            if missing_types:
+                scan_lines.append("")
+                scan_lines.append(
+                    f"提示: {len(missing_types)} 类组件未找到"
+                    f"（{', '.join(missing_types)}）。"
+                    f"如需创建，使用 add_to_scene_from_class。"
+                )
+
+            # Step 2: 获取属性名（含 component 子对象递归）
             for actor_type, actor_names in actors_found.items():
                 if not actor_names:
                     continue
                 all_properties[actor_type] = {}
                 for actor_name in actor_names[:1]:
                     try:
+                        # 2a. 获取 actor 顶层属性名
                         props_result = await ue_client.call_tool(
                             "toolset_registry.toolsets.core.object.ObjectTools.list_properties",
-                            {"actor_name": actor_name},
+                            {"instance": {"refPath": actor_name}},
                         )
                         props_parsed = _parse_raw_result(props_result)
                         props_text = _extract_parsed_text(
                             props_parsed, props_result,
                         )
-                        prop_names = _extract_property_names(props_text)
-                        all_properties[actor_type][actor_name] = prop_names
+                        actor_prop_names = _extract_property_names(props_text)
+
+                        # 2b. 解析 component 引用，递归获取 component 级属性
+                        all_names = await _resolve_component_properties(
+                            ue_client, actor_name, actor_prop_names,
+                        )
+
+                        all_properties[actor_type][actor_name] = all_names
                     except Exception as e:
                         logger.warning(
                             "获取 %s 属性列表失败: %s", actor_name, e,
@@ -1013,6 +1041,7 @@ def build_server(
                     logger.warning("写入 atmosphere-mapping.md 失败: %s", e)
 
             # Step 7: 组装返回——内联完整映射
+            _session_mapping_generated = True
             duration_ms = (time.monotonic() - t0) * 1000
             result_text = (
                 "氛围组件扫描完成：\n"
@@ -1219,7 +1248,34 @@ def _item_to_name(item: Any) -> str:
 
 
 def _extract_actor_names(parsed: Any) -> list[str]:
-    """从 find_actors 返回值中提取 actor 名称列表."""
+    """从 find_actors 返回值中提取 actor 名称列表.
+
+    处理两种格式：
+      1. MCP content 包裹（ue_client.call_tool 真实返回）:
+         {"content": [{"type": "text", "text": "{\\"returnValue\\": [...]}"}]}
+         其中 text 内层是 JSON 字符串，需二次解析。
+      2. 直接 dict（向后兼容旧测试 mock）:
+         {"returnValue": [...]}
+    """
+    # ---- 解包 MCP content 数组 ----
+    if isinstance(parsed, dict):
+        content = parsed.get("content", [])
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    if text:
+                        try:
+                            inner = json.loads(text)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if isinstance(inner, dict) and "returnValue" in inner:
+                            rv = inner["returnValue"]
+                            if isinstance(rv, list):
+                                return [_item_to_name(item) for item in rv if item]
+                        if isinstance(inner, list):
+                            return [_item_to_name(item) for item in inner if item]
+    # ---- 向后兼容：直接 dict / list 格式 ----
     if isinstance(parsed, list):
         return [str(item) for item in parsed if item]
     if isinstance(parsed, dict):
@@ -1230,6 +1286,7 @@ def _extract_actor_names(parsed: Any) -> list[str]:
         rv = parsed.get("returnValue")
         if isinstance(rv, list):
             return [_item_to_name(item) for item in rv if item]
+    # ---- 最终 fallback ----
     text = str(parsed)
     lines = text.strip().split("\n")
     return [line.strip() for line in lines if line.strip()
@@ -1256,6 +1313,101 @@ def _extract_property_names(parsed_text: str | None) -> list[str]:
             if not line.startswith("#") and len(line) < 100:
                 names.append(line)
     return names
+
+
+async def _resolve_component_properties(
+    ue_client: "McpClientSession",
+    actor_path: str,
+    actor_prop_names: list[str],
+) -> list[str]:
+    """从 actor 属性中识别 component 引用字段，递归获取 component 级属性名.
+
+    UE 的 Actor-Component 关系是两层结构：
+      - Actor 顶层字段如 ``lightComponent`` 的值是 component refPath
+      - 真正的氛围属性（intensity, lightColor 等）在 component 子对象上
+
+    此函数识别以 "Component" 结尾的字段，调 get_properties 解析其 refPath，
+    再对每个 component 调 list_properties 获取属性名。
+
+    Returns:
+        合并后的属性名列表：actor 直接属性 + 所有 component 的属性。
+    """
+    # 疑似 component 引用字段
+    suspect_fields = [
+        p for p in actor_prop_names
+        if p.endswith("Component") or "Component" in p
+    ]
+    if not suspect_fields:
+        return actor_prop_names
+
+    # 调 get_properties 解析这些字段的实际值（refPath）
+    try:
+        result_text = await ue_client.call_tool(
+            "toolset_registry.toolsets.core.object.ObjectTools.get_properties",
+            {"instance": {"refPath": actor_path}, "properties": suspect_fields},
+        )
+        parsed = _parse_raw_result(result_text)
+        text = _extract_parsed_text(parsed, result_text) or ""
+        rv = _try_unwrap_return_value(text)
+    except Exception:
+        return actor_prop_names
+
+    if rv is None:
+        return actor_prop_names
+
+    # 分离 component refPath vs 普通属性
+    component_refs: dict[str, str] = {}
+    direct_props: list[str] = []
+
+    for name in actor_prop_names:
+        if name in suspect_fields:
+            val = rv.get(name)
+            if isinstance(val, dict) and val.get("refPath"):
+                component_refs[name] = val["refPath"]
+                continue
+        direct_props.append(name)
+
+    # 递归获取 component 属性名
+    all_names = list(direct_props)
+    for _comp_field, comp_refpath in component_refs.items():
+        try:
+            comp_result = await ue_client.call_tool(
+                "toolset_registry.toolsets.core.object.ObjectTools.list_properties",
+                {"instance": {"refPath": comp_refpath}},
+            )
+            comp_parsed = _parse_raw_result(comp_result)
+            comp_text = _extract_parsed_text(comp_parsed, comp_result)
+            comp_names = _extract_property_names(comp_text)
+            all_names.extend(comp_names)
+        except Exception as e:
+            logger.warning(
+                "获取 component %s 属性失败: %s", comp_refpath, e,
+            )
+
+    return all_names
+
+
+def _try_unwrap_return_value(text: str) -> dict | None:
+    """尝试解包 returnValue JSON 包装.
+
+    格式: {"returnValue": "<json_string>"}
+    返回内层 JSON dict，或 None。
+    """
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(parsed, dict) and "returnValue" in parsed:
+        rv = parsed["returnValue"]
+        if isinstance(rv, str):
+            try:
+                inner = json.loads(rv)
+                return inner if isinstance(inner, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                return None
+        if isinstance(rv, dict):
+            return rv
+    return None
 
 
 def _build_trend_summary(
