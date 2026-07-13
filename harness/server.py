@@ -642,85 +642,6 @@ def build_server(
             ref_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
             _session_reference = {"b64": ref_b64, "path": str(ref_path)}
-            # ---- 视角自动对齐 ----
-            camera_aligned = False
-            ref_view = _session_reference.get("ref_view")
-            if ref_view is None:
-                ref_view = await _analyze_viewpoint(config, ref_b64)
-                if ref_view is not None:
-                    _session_reference["ref_view"] = ref_view
-                    logger.info(
-                        "参考图视角: pitch=%.0f height_offset=%.0f",
-                        ref_view["pitch"], ref_view["height_offset"],
-                    )
-
-            cur_view = await _analyze_viewpoint(config, cur_b64)
-            if ref_view is not None and cur_view is not None:
-                pitch_diff = abs(ref_view["pitch"] - cur_view["pitch"])
-                logger.info(
-                    "视角偏差: ref=%.0f cur=%.0f diff=%.0f",
-                    ref_view["pitch"], cur_view["pitch"], pitch_diff,
-                )
-                if pitch_diff > 15:
-                    try:
-                        landscape_z = await _get_landscape_z(ue_client)
-                    except Exception:
-                        landscape_z = None
-                    if landscape_z is None:
-                        landscape_z = 0.0
-                    new_z = landscape_z + ref_view["height_offset"]
-                    # 保留当前 x,y,yaw
-                    try:
-                        current_xform = await ue_client.call_tool(
-                            _CAMERA_ALIGN_TOOLS["get_camera"], {},
-                        )
-                        x_parsed = _parse_raw_result(current_xform)
-                        if isinstance(x_parsed, dict) and "returnValue" in x_parsed:
-                            x_rv = x_parsed["returnValue"]
-                        else:
-                            x_rv = x_parsed
-                        cur_x = 0.0
-                        cur_y = 0.0
-                        cur_yaw = 0.0
-                        if isinstance(x_rv, dict):
-                            loc = x_rv.get("location", {})
-                            rot = x_rv.get("rotation", {})
-                            if isinstance(loc, dict):
-                                cur_x = float(loc.get("x", 0))
-                                cur_y = float(loc.get("y", 0))
-                            if isinstance(rot, dict):
-                                cur_yaw = float(rot.get("yaw", 0))
-                    except Exception:
-                        cur_x, cur_y, cur_yaw = 0.0, 0.0, 0.0
-
-                    await ue_client.call_tool(
-                        _CAMERA_ALIGN_TOOLS["set_camera"],
-                        {
-                            "transform": {
-                                "location": {"x": cur_x, "y": cur_y, "z": new_z},
-                                "rotation": {
-                                    "pitch": ref_view["pitch"],
-                                    "yaw": cur_yaw,
-                                    "roll": 0,
-                                },
-                            }
-                        },
-                    )
-                    # 重截视口
-                    try:
-                        from harness.verification.capturer import (
-                            capture as _re_capture,
-                        )
-                        max_w2, max_h2 = config.vision_max_size
-                        new_shot = await _re_capture(
-                            ue_client, max_w2, max_h2, mode="viewport",
-                        )
-                        cur_b64 = new_shot.data_b64
-                        camera_aligned = True
-                    except Exception as e:
-                        logger.warning("视角修正后重截失败: %s", e)
-            # ---- 视角对齐结束 ----
-
 
             # 4. 量化指标
             from harness.verification.metrics import compute_match_metrics
@@ -749,9 +670,9 @@ def build_server(
             # 保存本次结果供下次对比
             _session_reference["prev_metrics"] = metrics_result
 
-            # 5. MiMo 8 维度双图对比
+            # 5. MiMo 9 维度双图对比
             question = (
-                "请从以下 8 个维度比较当前截图与参考图的差异。"
+                "请从以下 9 个维度比较当前截图与参考图的差异。"
                 "每个维度只输出方向性判定，不需要描述绝对值：\n\n"
                 "亮度 (Brightness):       darker / similar / brighter\n"
                 "对比度 (Contrast):       lower / similar / higher\n"
@@ -760,7 +681,11 @@ def build_server(
                 "饱和度 (Saturation):      less_saturated / similar / more_saturated\n"
                 "大气密度 (Haze):          clearer / similar / hazier\n"
                 "阴影方向 (Shadow Direction): 方向描述 + 是否一致\n"
-                "天空表现 (Sky):           颜色/云量/渐变的差异方向\n\n"
+                "天空表现 (Sky):           颜色/云量/渐变的差异方向\n"
+                "视角方向 (Viewpoint Direction): looking_more_up / similar / looking_more_down\n\n"
+                "注意：视角方向只比较相机俯仰角（向上看 vs 向下看），"
+                "不考虑相机距离和目标对象。"
+                "如果两张图拍摄的是完全不同的场景/对象，填 'different_scene'。\n\n"
                 "每个判定配一句话佐证（你看到什么让你这样判断）。"
             )
 
@@ -784,16 +709,9 @@ def build_server(
             ]
             if trend_lines:
                 lines.extend(trend_lines)
-            if camera_aligned:
-                align_note = (
-                    f"📷 视角已自动修正: 原 pitch={cur_view["pitch"]:.0f}° → {ref_view["pitch"]:.0f}°,"
-                    f" 高度 offset={ref_view["height_offset"]:.0f}"
-                )
-                lines.insert(0, align_note)
-                lines.insert(1, "")
             lines.append("")
 
-            lines.append("MiMo 8 维度差异：")
+            lines.append("MiMo 9 维度差异：")
             lines.append(verdict.answer)
 
             if metrics_result:
@@ -1652,122 +1570,6 @@ def _build_trend_summary(
         )
 
     return lines
-
-
-
-_VIEWPOINT_PROMPT = (
-    "评估这张截图的拍摄视角。"
-    "UE 坐标系：pitch=0 为水平向前，pitch=-90 为垂直向下看地面。\n"
-    "\n"
-    "pitch 数值参考：\n"
-    "  地平线在画面中间，相机几乎水平 → pitch 在 -5 到 0\n"
-    "  能看到天空，地面占下半部分 → pitch 在 -15 到 -30\n"
-    "  几乎看不到天空，全部是地面/物体 → pitch 在 -50 到 -70\n"
-    "  不确定时取中间值，粒度 5°\n"
-    "\n"
-    "相机离地表高度（UE 单位，1 人身高≈170）：\n"
-    "  贴近地面 → 50\n"
-    "  人眼或略高 → 170\n"
-    "  几层楼 → 800\n"
-    "  更大高度 → 2000~5000，根据画面推断\n"
-    "\n"
-    "只输出 JSON，不要其他文字：\n"
-    '{"pitch": <推测数字>, "height_offset": <推测数字>}'
-)
-
-
-async def _analyze_viewpoint(
-    config: Config, image_b64: str,
-) -> "dict[str, float] | None":
-    """MiMo 单图视角分析，返回 {pitch, height_offset} 或 None.
-
-    直接调 _call_vision_api（不经 VisionSubAgent.check），
-    避免 _VISION_FORMAT_REMINDER 的标准 schema 与 _VIEWPOINT_PROMPT 的自定义
-    schema 冲突。_VIEWPOINT_PROMPT 末尾已自带 JSON 格式定义。
-    """
-    messages = [{
-        "role": "user",
-        "content": [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": image_b64,
-                },
-            },
-            {"type": "text", "text": _VIEWPOINT_PROMPT},
-        ],
-    }]
-
-    try:
-        response = await _call_vision_api(
-            config, messages,
-            system=VISION_SYSTEM_PROMPT, temperature=0.7,
-        )
-    except Exception:
-        return None
-
-    json_str = _extract_json_object(response)
-    if json_str is None:
-        logger.warning("视角分析未找到 JSON: %.100s", response[:200])
-        return None
-    try:
-        result = json.loads(json_str)
-        pitch = float(result.get("pitch", 0))
-        height_offset = float(result.get("height_offset", 170))
-        return {"pitch": pitch, "height_offset": height_offset}
-    except (json.JSONDecodeError, ValueError, TypeError) as e:
-        logger.warning("视角分析 JSON 解析失败: %s", e)
-        return None
-
-
-_CAMERA_ALIGN_TOOLS: dict[str, str] = {
-    "find_actors": "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
-    "get_actor_bounds": "toolset_registry.toolsets.core.actor.ActorTools.get_actor_bounds",
-    "get_camera": "ToolsetRegistry.EditorAppToolset.GetCameraTransform",
-    "set_camera": "ToolsetRegistry.EditorAppToolset.SetCameraTransform",
-}
-
-
-async def _get_landscape_z(ue_client: "McpClientSession") -> "float | None":
-    """通过 find_actors + get_actor_bounds 获取 Landscape 表面 Z 高度."""
-    try:
-        raw = await ue_client.call_tool(
-            _CAMERA_ALIGN_TOOLS["find_actors"],
-            {"glob": "*Landscape*", "tag": ""},
-        )
-        parsed = _parse_raw_result(raw)
-        names = _extract_actor_names(parsed)
-        if not names:
-            return None
-        first = names[0]
-        if isinstance(first, dict):
-            ref_path = first.get("refPath", "")
-        else:
-            ref_path = str(first)
-        if not ref_path:
-            return None
-        raw2 = await ue_client.call_tool(
-            _CAMERA_ALIGN_TOOLS["get_actor_bounds"],
-            {"actor": {"refPath": ref_path}},
-        )
-        parsed2 = _parse_raw_result(raw2)
-        # _unwrap_return_value 接受 string 而非 dict——直接提取 returnValue
-        if isinstance(parsed2, dict) and "returnValue" in parsed2:
-            rv = parsed2["returnValue"]
-        else:
-            rv = parsed2
-        if isinstance(rv, dict):
-            origin = rv.get("origin", {})
-            extent = rv.get("boxExtent", {})
-            if isinstance(origin, dict) and isinstance(extent, dict):
-                z_center = float(origin.get("z", 0))
-                z_half = float(extent.get("z", 0))
-                return z_center + z_half
-        return None
-    except Exception:
-        return None
 
 
 def _render_mapping_markdown(mapping: dict[str, Any]) -> str:
