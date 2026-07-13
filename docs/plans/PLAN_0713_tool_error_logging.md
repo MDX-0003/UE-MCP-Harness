@@ -71,11 +71,22 @@ def set_error_log_path(path: _Path) -> None:
 
 
 class _ErrorLoggingSendWrapper:
-    """ASGI send 包装器：拦截 JSON-RPC error 响应并写入 tool_errors.jsonl。
+    """ASGI send 包装器：拦截 MCP SDK 层参数校验失败并写入 tool_errors.jsonl。
 
-    MCP SDK 在参数校验失败时会在 transport 层直接返回 error JSON-RPC 响应，
-    绕过 Harness 的 call_tool handler 和 ToolCallLogger。
-    此包装器在 ASGI 出口处捕获这些响应。
+    **两种工具调用错误的本质区别：**
+
+    1. SDK 层校验失败（本包装器拦截目标）：
+       Harness MCP SDK 根据 list_tools 时注册的 inputSchema 校验 arguments。
+       校验失败时 SDK 在 call_tool handler 之前直接返回 error。
+       → call_tool() 从未被调用，interceptor 链被跳过。
+       → 唯一捕获点: 此 ASGI wrapper。
+
+    2. UE 返回的 error（已被 ToolCallLogger 正常记录）：
+       请求通过 SDK 校验，正常进入 call_tool() → ue_client.call_tool() →
+       UE 执行并返回 error → interceptor 链 → ToolCallLogger 写入 JSONL。
+       → 已有一条完整的日志链路，无需额外拦截。
+
+    此包装器专门解决第一种情况——请求在到达应用代码前就被 SDK 终止的情况。
     """
 
     def __init__(self, send):

@@ -341,7 +341,16 @@ def cmd_start(args: argparse.Namespace) -> int:
                 inst_path = tool_logger.session_dir / "instructions.md"
                 inst_path.write_text(instructions, encoding="utf-8")
                 logger.debug("Instructions 已写入: %s", inst_path)
-            await serve(server, host=config.listen_host, port=config.listen_port)
+
+            # SDK 层校验错误日志路径（与 tool_calls.jsonl 同目录）
+            _error_log = None
+            if tool_logger is not None and tool_logger.session_dir is not None:
+                _error_log = str(tool_logger.session_dir / "tool_errors.jsonl")
+
+            await serve(
+                server, host=config.listen_host, port=config.listen_port,
+                error_log_path=_error_log,
+            )
 
         except Exception as e:
             logger.error("启动失败: %s", e)

@@ -19,7 +19,26 @@ LLM 在 Line 3 之前还有一次**未出现在 JSONL 中的调用**。LLM 端�
 
 ### 根因
 
-MCP SDK 的参数校验（`inputSchema.required`）发生在 `call_tool` handler **之前**。当 LLM 发送缺少 `required` 字段的请求时，SDK 直接在传输层拒绝，返回 `isError=True`。这跳过了 Harness 的 `call_tool` → `interceptor chain` → `ToolCallLogger` 路径，因此不被记录。
+此错误来自 **Harness 本地的 MCP SDK 层**，而非 UE。执行流程：
+
+1. UE MCP Server 在 `list_tools` 时返回 `find_actors` 的 `inputSchema`，其中 `tag` 标注为 `required`
+2. Harness 将该 schema 原样注册到自己的 MCP Server
+3. LLM 调用 `find_actors({"glob": "*Light*"})` — 缺少 `tag`
+4. **Harness 的 MCP SDK** 根据注册的 schema 校验 `arguments`，发现缺少 required 字段
+5. SDK 在 `call_tool` handler 之前直接返回 error → `server.py` 的 `call_tool()` 从未被调用
+6. 整条 interceptor 链（含 `ToolCallLogger`）被跳过 → 无日志
+
+**与 UE 返回的 error 的本质区别：**
+
+| | SDK 层校验失败 | UE 返回的 error |
+|------|:--:|:--:|
+| 触发位置 | Harness 本地 MCP SDK | UE MCP Server (port 8000) |
+| `call_tool()` 被调用？ | ❌ 未到达 | ✅ 正常到达 |
+| 经过 interceptor 链？ | ❌ 跳过 | ✅ ToolCallLogger 正常记录 |
+| 当前是否有日志？ | ❌ 无 | ✅ JSONL 中有 error 字段 |
+| 错误信息来源 | SDK 根据 inputSchema 生成 | UE 端实际执行返回 |
+
+本问题属于前者——SDK 层校验失败，是请求在到达应用代码前就被拦截的情况。
 
 ### 影响
 

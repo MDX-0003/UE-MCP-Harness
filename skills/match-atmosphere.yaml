@@ -44,6 +44,13 @@ steps: |
   通过 MiMo 筛选氛围相关属性并按 9 维度（亮度/对比度/色温/色调偏移/
   饱和度/大气密度/阴影方向/天空/视角方向）分类。映射以 Markdown 表格形式直接返回。
 
+  **映射表返回的 refPath 已可直接用于 get_properties / set_properties，**
+  **无需再手动调 find_actors 查找组件。** 如需手动查找（如扫描可能遗漏的组件）：
+    find_actors({"glob": "*Light*", "tag": ""}) → 名称包含 Light 的 Actor
+    find_actors({"glob": "*Fog*", "tag": ""})   → 名称包含 Fog 的 Actor
+    注意: tag 为必填参数，传空字符串 "" 匹配所有 Tag（非类名匹配）。
+          Actor 通常没有 Tag 组件，因此 tag="" 是常态。glob 做名称模糊匹配。
+
   ### Step 2 — 加载参考图并对比
   调 match_reference("<path>")，返回 9 维度方向性差异清单 + 5 项量化指标。
   **记下色温 R/B 比值**——参考图和当前场景各有一个数。后续每轮调整都要对比这个值。
