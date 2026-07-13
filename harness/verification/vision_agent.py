@@ -289,7 +289,7 @@ class VisionSubAgent:
         try:
             response = await _call_vision_api(
                 self.config, messages,
-                system=VISION_SYSTEM_PROMPT, temperature=0.7,
+                system=VISION_SYSTEM_PROMPT, temperature=0.0,
             )
             return _parse_verdict(response)
         except Exception as e:

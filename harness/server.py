@@ -89,8 +89,9 @@ def build_server(
 
     # ---- 工具缓存（list_tools 调用间共享） ----
     _cached_raw_tools: list[dict] = []
-    # ---- 参考图会话状态（match_reference / vision_compare 共享） ----
+    # ---- 参考图会话状态 ----
     _session_reference: dict[str, Any] = {}
+    _is_first_load: bool = False
     _session_mapping_generated: bool = False
     # ---- 005 Skill Registry ----
     _skills_dir = skills_dir if skills_dir is not None else (Path.home() / ".ue-harness" / "skills")
@@ -273,35 +274,10 @@ def build_server(
         ))
         # ---- 参考图工具 (Plan 0708) ----
         result.append(Tool(
-            name="vision_compare",
-            description=(
-                "双图对比验证——参考图 vs 当前截图。针对单个氛围组件做三态判定"
-                "（✓ closer / ≈ similar / ✗ further）。"
-                "默认复用 Session 内最新截图，不消耗额外截图 token。"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "component": {
-                        "type": "string",
-                        "enum": ["DirectionalLight", "SkyAtmosphere", "ExponentialHeightFog",
-                                 "VolumetricCloud", "PostProcessVolume"],
-                        "description": "要对比的氛围组件",
-                    },
-                    "reuse_screenshot": {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "复用 Session 内最新截图。",
-                    },
-                },
-                "required": ["component"],
-            },
-        ))
-        result.append(Tool(
             name="match_reference",
             description=(
-                "加载参考图，与当前 UE 视口做 8 维度整体对比（亮度/对比度/色温/"
-                "色调偏移/饱和度/大气密度/阴影方向/天空表现）。返回结构化方向性差异"
+                "加载参考图，与当前 UE 视口做 9 维度整体对比（亮度/对比度/色温/"
+                "色调偏移/饱和度/大气密度/阴影方向/天空表现/视角方向）。返回结构化方向性差异"
                 "+ 5 项量化指标。"
             ),
             inputSchema={
@@ -342,7 +318,7 @@ def build_server(
           - vision_* :      Issue 015 Vision Session 工具
         """
 
-        nonlocal _session_reference, _session_mapping_generated
+        nonlocal _session_reference, _session_mapping_generated, _is_first_load
 
         # 辅助：为 Harness 自有工具记录日志到 JSONL
         # 未经 UE 透传路径的工具需手动触发 ToolCallLogger
@@ -537,72 +513,6 @@ def build_server(
 
         # ---- 参考图工具 (Plan 0708) ----
 
-        if name == "vision_compare":
-            t0 = time.monotonic()
-            if vision_session_manager is None:
-                return CallToolResult(content=[TextContent(
-                    type="text", text="Vision Session Manager 未初始化。",
-                )], isError=True)
-            session = vision_session_manager.get_active()
-            if session is None or not session.screenshots:
-                return CallToolResult(content=[TextContent(
-                    type="text",
-                    text="没有可复用的截图。请先调 vision_screenshot 获取视口截图。",
-                )], isError=True)
-
-            component = arguments.get("component", "")
-            _valid_components = (
-                "DirectionalLight", "SkyAtmosphere", "ExponentialHeightFog",
-                "VolumetricCloud", "PostProcessVolume",
-            )
-            if component not in _valid_components:
-                return CallToolResult(content=[TextContent(
-                    type="text",
-                    text=f"无效的 component: '{component}'。"
-                         f"可选: {', '.join(_valid_components)}",
-                )], isError=True)
-
-            latest_ss = session.screenshots[-1]
-            cur_b64 = latest_ss.b64
-            ref_b64 = _session_reference.get("b64") if _session_reference else None
-            if ref_b64 is None:
-                return CallToolResult(content=[TextContent(
-                    type="text",
-                    text="未找到参考图。请先调 match_reference(path) 加载。",
-                )], isError=True)
-
-            question = (
-                f"仅关注 {component} 对画面氛围的影响，忽略其他组件的差异。\n"
-                f"当前场景在 {component} 的表现，与参考图相比：\n"
-                f"  ✓ closer — 更接近参考图了\n"
-                f"  ≈ similar — 没有明显变化\n"
-                f"  ✗ further — 更远离参考图了\n\n"
-                f"选择 ✓/≈/✗，给一句佐证。"
-            )
-
-            agent = VisionSubAgent(config)
-            try:
-                verdict = await agent.compare_with_reference(
-                    ref_b64, cur_b64, question,
-                )
-            except Exception as e:
-                duration_ms = (time.monotonic() - t0) * 1000
-                err_text = f"vision_compare 失败: {e}"
-                await _log_harness_call(name, arguments, err_text, duration_ms, error=e)
-                return CallToolResult(content=[TextContent(
-                    type="text", text=err_text,
-                )], isError=True)
-
-            duration_ms = (time.monotonic() - t0) * 1000
-            result_text = json.dumps({
-                "answer": verdict.answer,
-                "confidence": verdict.confidence,
-                "caveats": verdict.caveats,
-                "observations": verdict.observations,
-            }, ensure_ascii=False, indent=2)
-            await _log_harness_call(name, arguments, result_text, duration_ms)
-            return CallToolResult(content=[TextContent(type="text", text=result_text)])
-
         if name == "match_reference":
             t0 = time.monotonic()
             ref_path_str = arguments.get("path", "")
@@ -641,7 +551,8 @@ def build_server(
             ref_img.save(buf, format="PNG")
             ref_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-            _session_reference = {"b64": ref_b64, "path": str(ref_path)}
+            _is_first_load = _session_reference.get("_loaded") is None
+            _session_reference = {"b64": ref_b64, "path": str(ref_path), "_loaded": True}
 
             # 4. 量化指标
             from harness.verification.metrics import compute_match_metrics
@@ -713,6 +624,20 @@ def build_server(
 
             lines.append("MiMo 9 维度差异：")
             lines.append(verdict.answer)
+            _badges = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+            lines.append(
+                f"置信度: {_badges.get(verdict.confidence, '🟡')} "
+                f"{verdict.confidence}"
+            )
+            if verdict.observations:
+                lines.append("")
+                lines.append("分项观察：")
+                for obs in verdict.observations:
+                    what = obs.get("what", "")
+                    finding = obs.get("finding", "")
+                    conf = obs.get("confidence", "medium")
+                    ob = _badges.get(conf, "~")
+                    lines.append(f"  {ob} {what}: {finding}")
 
             if metrics_result:
                 m = metrics_result
@@ -745,18 +670,23 @@ def build_server(
                 lines.append("MiMo 分析仍然有效。")
 
             lines.append("")
-            if not _session_mapping_generated:
+            lines.append("---")
+            lines.append("")
+            if _is_first_load:
                 lines.append(
-                    "下一步：请先调 build_atmosphere_mapping() 生成参数映射，"
-                    "再对照映射和差异调整各组件。"
+                    "在存在参考图的任务里，每轮迭代请使用 "
+                    f"match_reference(\"{ref_path_str}\") 获取对比反馈，"
+                    "不要用 vision_ask 做氛围对比。"
                 )
-            else:
-                lines.append(
-                    "对照映射和差异调整各组件。交叉参考 MiMo 分析和量化指标——"
-                )
-                lines.append(
-                    "两者一致则高置信，不一致则以 MiMo 为主、量化指标为参考修正。"
-                )
+                lines.append("")
+            lines.append(
+                "match_reference 每次返回量化指标（R/B、亮度、饱和度）——"
+                "这是确定性像素计算，不受 VLM 主观判断影响，是最可靠的调整指南针。"
+            )
+            lines.append(
+                "⚠ MiMo 分析与量化指标方向一致 → 高置信；"
+                "不一致 → 以量化指标为准。"
+            )
 
             result_text = "\n".join(lines)
             await _log_harness_call(name, arguments, result_text, duration_ms)

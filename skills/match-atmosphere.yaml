@@ -1,6 +1,6 @@
 # 参考图氛围匹配 Skill
 name: match-atmosphere
-description: "参考图驱动的场景氛围匹配：加载参考图 → 8 维度对比 → 按组件逐项调整 → 三态验证闭环"
+description: "参考图驱动的场景氛围匹配：加载参考图 → 9 维度对比 → 按组件逐项调整 → 量化指标导航验证闭环"
 triggers:
   - "参考图"
   - "参考这张图"
@@ -30,7 +30,6 @@ tools_allowlist:
   # Harness 自有工具
   - "build_atmosphere_mapping"
   - "match_reference"
-  - "vision_compare"
   - "vision_screenshot"
   - "vision_ask"
   - "vision_tell"
@@ -42,28 +41,26 @@ steps: |
 
   ### Step 1 — 生成参数映射
   调 build_atmosphere_mapping()，Harness 自动扫描 5 类氛围组件的可用属性，
-  通过 MiMo 筛选氛围相关属性并按 8 维度（亮度/对比度/色温/色调偏移/
-  饱和度/大气密度/阴影方向/天空）分类。映射以 Markdown 表格形式直接返回。
+  通过 MiMo 筛选氛围相关属性并按 9 维度（亮度/对比度/色温/色调偏移/
+  饱和度/大气密度/阴影方向/天空/视角方向）分类。映射以 Markdown 表格形式直接返回。
 
   ### Step 2 — 加载参考图并对比
-  调 match_reference("<path>")，返回 8 维度方向性差异清单 + 5 项量化指标。
+  调 match_reference("<path>")，返回 9 维度方向性差异清单 + 5 项量化指标。
   **记下色温 R/B 比值**——参考图和当前场景各有一个数。后续每轮调整都要对比这个值。
 
   ### Step 3 — 逐组件调整（按此顺序：先独立，后联动）
   从 match_reference 的差异清单和 Step 1 的映射表中，确定要调的组件和属性。
   **调整顺序很重要：** 先调独立组件（雾、体积云），再调会"染色"全局的组件（天空大气、方向光）。
-  因为 Fog 的橙色会污染 DirectionalLight 在截图中的视觉效果，导致 vision_compare 误判。
 
   对每个组件：
     a. 调 get_properties 获取当前值
     b. 根据差异方向调整属性（参考映射表中的属性名和维度标注）
     c. 调 set_properties 写入
-    d. 每调完一个组件，调 match_reference("<path>") 重新获取量化指标（R/B 比值、亮度、饱和度）
-       对比指标是否向参考值收敛。如果偏离，立即反向调整。
-    e. 调 vision_compare(component) 验证方向
-       ✓ closer → 下一个组件
-       ≈ similar → 换属性或加大幅度，回到 b
-       ✗ further → 反向调整，回到 b
+    d. 调 match_reference("<path>") 获取新的量化指标（R/B 比值、亮度、饱和度）
+       **以量化指标为准判断方向。**
+       - R/B 比值向参考值收敛 → 方向正确，下一个组件
+       - R/B 比值偏离参考值 → 方向错误，反向调整，回到 b
+       - 指标无明显变化 → 换属性或加大幅度，回到 b
 
   ### Step 4 — 整体确认
   全部组件调整完成且量化指标接近参考值后，调 vision_screenshot 确认整体效果。
@@ -78,8 +75,10 @@ steps: |
     确认截图可见后再回 Step 3。
 
   ### 提示
-  - vision_compare 默认复用已有截图，token 消耗极低
+  - match_reference 每次返回量化指标（R/B、亮度、饱和度）——这是最可靠的调整指南针。
+    量化指标是确定性像素计算，不受 VLM 主观判断影响。
+    **MiMo 分析与量化指标方向一致 → 高置信；不一致 → 以量化指标为准。**
+  - 每轮调用 match_reference 自动截图，无需手动 vision_screenshot。
   - 每轮迭代后 L2 读回会自动确认写入值（ReadbackInterceptor 已在链中）
   - 多实例组件（>1 个）优先调整最可能影响整体的那一个
-  - match_reference 每次返回的量化指标（R/B、亮度、饱和度）是你最可靠的调整指南针，
-    比 vision_compare 的 ✗/✓ 更精确——用它来判断调整方向和幅度
+  - MiMo 9 维度差异提供整体方向参考，但具体每步调整以量化指标为导航
