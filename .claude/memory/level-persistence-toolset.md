@@ -9,6 +9,8 @@ metadata:
 
 位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset/`，C++ Editor 插件，通过 UToolsetDefinition + UEditorSubsystem 模式向 UE MCP Server 注册 7 个工具。
 
+> **状态 (2026-07-14)：** 七工具全部实现并通过测试。`test_tools.py`（五工具基础测试）和 `test_saveas_load.py`（SaveLevelAs + LoadLevel）均已跑通。UE 侧无需进一步开发。
+
 ## 七工具一览
 
 | 工具 | 参数 | 用途 |

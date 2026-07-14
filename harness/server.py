@@ -64,6 +64,7 @@ def build_server(
     pending_screenshot_ref: list[Any] | None = None,
     vision_session_manager: Any | None = None,
     skills_dir: "Path | None" = None,
+    stop_limit: "StopLimitInterceptor | None" = None,
 ) -> Server:
     """构建 MCP Server 实例。
 
@@ -93,6 +94,8 @@ def build_server(
     _session_reference: dict[str, Any] = {}
     _is_first_load: bool = False
     _session_mapping_generated: bool = False
+    # ---- Phase 3: 硬终止拦截器 ----
+    _stop_limit = stop_limit
     # ---- 005 Skill Registry ----
     _skills_dir = skills_dir if skills_dir is not None else (Path.home() / ".ue-harness" / "skills")
     skill_registry = SkillRegistry(skills_dir=_skills_dir)
@@ -119,6 +122,43 @@ def build_server(
             "tools_allowlist": _normalize_list(parsed.get("tools_allowlist", [])),
             "steps": str(parsed.get("steps", "")),
         }
+
+    async def _ensure_best_snapshot_path(ue, session_ref: dict) -> str:
+        """构造快照路径: {当前关卡目录}/{MMDD}-{关卡名}.umap。
+
+        首次调用时查询 UE 获取当前关卡路径，后续复用缓存。
+        Session 重置（换参考图）时缓存被清空，重新查询。
+        """
+        cached = session_ref.get("_snapshot_base_path")
+        if cached:
+            return cached
+
+        try:
+            result = await ue.call_tool(
+                "LevelPersistenceToolset.LevelPersistenceToolset.GetLevelFingerprint",
+                {"LevelPath": ""},
+            )
+            parsed = _parse_raw_result(result)
+            text = _extract_parsed_text(parsed, result) or ""
+            rv = json.loads(text) if isinstance(text, str) else {}
+            pkg_path = rv.get("packagePath", "") if isinstance(rv, dict) else ""
+        except Exception:
+            pkg_path = ""
+
+        from datetime import datetime
+        date_prefix = datetime.now().strftime("%m%d")
+
+        if pkg_path:
+            parts = pkg_path.rsplit("/", 1)
+            if len(parts) == 2:
+                snapshot_path = f"{parts[0]}/{date_prefix}-{parts[1]}"
+            else:
+                snapshot_path = f"/Game/{date_prefix}-Snapshot"
+        else:
+            snapshot_path = f"/Game/{date_prefix}-Snapshot"
+
+        session_ref["_snapshot_base_path"] = snapshot_path
+        return snapshot_path
 
     # ---- Context Providers ----
 
@@ -318,7 +358,7 @@ def build_server(
           - vision_* :      Issue 015 Vision Session 工具
         """
 
-        nonlocal _session_reference, _session_mapping_generated, _is_first_load
+        nonlocal _session_reference, _session_mapping_generated, _is_first_load, _stop_limit
 
         # 辅助：为 Harness 自有工具记录日志到 JSONL
         # 未经 UE 透传路径的工具需手动触发 ToolCallLogger
@@ -517,6 +557,36 @@ def build_server(
             t0 = time.monotonic()
             ref_path_str = arguments.get("path", "")
 
+            # Phase 3: 硬终止检查（倒计时归零 或 总轮次兜底）
+            _match_count = _session_reference.get("_match_count", 0)
+            _countdown = _session_reference.get("_countdown_remaining")
+            _max_allowed = _session_reference.get("_max_allowed_rounds", 10)
+
+            should_stop = False
+            stop_reason = ""
+
+            if _countdown is not None and _countdown < 0:
+                should_stop = True
+                stop_reason = (
+                    "倒计时已归零"
+                    "（直方图≥0.70 达成后已用尽 3 次调整机会）"
+                )
+            elif _countdown is None and _match_count >= _max_allowed:
+                should_stop = True
+                stop_reason = f"已达到最大轮次限制（{_max_allowed} 轮）"
+
+            if should_stop and _stop_limit is not None:
+                best_path = _session_reference.get("best_snapshot_path")
+                summary = _stop_limit.build_summary(
+                    _session_reference, best_path, stop_reason,
+                )
+                duration_ms = (time.monotonic() - t0) * 1000
+                await _log_harness_call(name, arguments, summary, duration_ms)
+                return CallToolResult(
+                    content=[TextContent(type="text", text=summary)],
+                    isError=True,
+                )
+
             # 1. 加载参考图
             try:
                 from PIL import Image as PILImage
@@ -552,7 +622,19 @@ def build_server(
             ref_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
             _is_first_load = _session_reference.get("_loaded") is None
-            _session_reference = {"b64": ref_b64, "path": str(ref_path), "_loaded": True}
+            _prev_path = _session_reference.get("path", "")
+            _is_new_reference = (str(ref_path) != _prev_path)
+
+            if _is_new_reference and not _is_first_load:
+                # 换了参考图 → 重置所有累积状态
+                _session_reference = {"_loaded": True}
+                _is_first_load = True
+
+            _session_reference.update({"b64": ref_b64, "path": str(ref_path), "_loaded": True})
+
+            # 递增 match_reference 调用计数（Phase 1）
+            _match_count = _session_reference.get("_match_count", 0) + 1
+            _session_reference["_match_count"] = _match_count
 
             # 4. 量化指标
             from harness.verification.metrics import compute_match_metrics
@@ -611,82 +693,177 @@ def build_server(
                     type="text", text=err_text,
                 )], isError=True)
 
-            # 6. 组装返回文本
+            # 6. 组装返回文本（正文先行，header 在倒计时激活后 prepend）
             duration_ms = (time.monotonic() - t0) * 1000
             ref_w, ref_h = ref_img.size
 
-            lines = [
-                f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
-            ]
+            body_lines: list[str] = []
             if trend_lines:
-                lines.extend(trend_lines)
-            lines.append("")
+                body_lines.extend(trend_lines)
+            body_lines.append("")
 
-            lines.append("MiMo 9 维度差异：")
-            lines.append(verdict.answer)
+            body_lines.append("MiMo 9 维度差异：")
+            body_lines.append(verdict.answer)
             _badges = {"high": "🟢", "medium": "🟡", "low": "🔴"}
-            lines.append(
+            body_lines.append(
                 f"置信度: {_badges.get(verdict.confidence, '🟡')} "
                 f"{verdict.confidence}"
             )
             if verdict.observations:
-                lines.append("")
-                lines.append("分项观察：")
+                body_lines.append("")
+                body_lines.append("分项观察：")
                 for obs in verdict.observations:
                     what = obs.get("what", "")
                     finding = obs.get("finding", "")
                     conf = obs.get("confidence", "medium")
                     ob = _badges.get(conf, "~")
-                    lines.append(f"  {ob} {what}: {finding}")
+                    body_lines.append(f"  {ob} {what}: {finding}")
 
             if metrics_result:
                 m = metrics_result
-                lines.append("")
-                lines.append("量化指标（全图统计，不受视点移动影响）：")
-                lines.append(f"{'':>12} {'参考图':>8} {'当前':>8} {'差异':>10}")
-                lines.append(
+
+                hist = m["histogram_correlation"]
+                rb_cur = m["color_temperature"]["cur_r_b_ratio"]
+
+                # Phase 1: 倒计时激活（hist≥0.70 首次达成时）
+                _countdown = _session_reference.get("_countdown_remaining")
+                if _countdown is None and hist >= 0.70:
+                    _session_reference["_countdown_remaining"] = 3
+                    _session_reference["_countdown_start_round"] = _match_count
+                    _session_reference["_max_allowed_rounds"] = _match_count + 3
+
+                # 倒计时递减
+                if _session_reference.get("_countdown_remaining") is not None:
+                    _session_reference["_countdown_remaining"] -= 1
+
+                body_lines.append("")
+                body_lines.append("量化指标（全图统计，不受视点移动影响）：")
+                body_lines.append(f"{'':>12} {'参考图':>8} {'当前':>8} {'差异':>10}")
+                body_lines.append(
                     f"{'亮度':>12} {m['luminance']['ref']:>8.1f} "
                     f"{m['luminance']['cur']:>8.1f} {m['luminance']['delta_pct']:>+9.1f}%"
                 )
-                lines.append(
+                body_lines.append(
                     f"{'对比度':>12} {m['contrast']['ref']:>8.1f} "
                     f"{m['contrast']['cur']:>8.1f} {m['contrast']['delta_pct']:>+9.1f}%"
                 )
                 ct = m["color_temperature"]
-                lines.append(
+                body_lines.append(
                     f"{'色温':>12} {'R/B=' + str(ct['ref_r_b_ratio']):>8} "
                     f"{'R/B=' + str(ct['cur_r_b_ratio']):>8}"
                 )
-                lines.append(
+                body_lines.append(
                     f"{'饱和度':>12} {m['saturation']['ref']:>8.1f} "
                     f"{m['saturation']['cur']:>8.1f} {m['saturation']['delta_pct']:>+9.1f}%"
                 )
-                lines.append(
+                body_lines.append(
                     f"{'直方图相似度':>12} {'':>8} {'':>8} "
                     f"{m['histogram_correlation']:>10.2f} (0→完全不同, 1→完全一致)"
                 )
-            elif metrics_error:
-                lines.append(f"\n⚠ 量化指标计算失败: {metrics_error}")
-                lines.append("MiMo 分析仍然有效。")
 
-            lines.append("")
-            lines.append("---")
-            lines.append("")
+                # Phase 1c: 最佳点追踪 + 连续下降检测
+                best = _session_reference.get("best_metrics")
+                if best is None or hist > best.get("histogram_correlation", 0):
+                    _session_reference["best_metrics"] = {
+                        "histogram_correlation": hist,
+                        "round": _session_reference.get("_match_count", 0),
+                        "rb_ratio": rb_cur,
+                    }
+                    body_lines.append("")
+                    body_lines.append(
+                        f"🏆 新最佳记录：直方图相似度 {hist:.2f}"
+                        f"（第 {_session_reference['best_metrics']['round']} 轮）"
+                    )
+
+                    # Phase 2: 最佳状态快照（仅首次跨过 0.70 时保存一次）
+                    if hist >= 0.70 and not _session_reference.get("_snapshot_saved"):
+                        _session_reference["_snapshot_saved"] = True
+                        snapshot_path = await _ensure_best_snapshot_path(
+                            ue_client, _session_reference,
+                        )
+                        try:
+                            await ue_client.call_tool(
+                                "LevelPersistenceToolset.LevelPersistenceToolset.SaveLevelAs",
+                                {"TargetPath": snapshot_path},
+                            )
+                            _session_reference["best_snapshot_path"] = snapshot_path
+                            body_lines.append("")
+                            body_lines.append(
+                                f"💾 快照已保存至 {snapshot_path}，编辑器仍在原关卡。"
+                                f"仅当需要回退错误操作时才调 LoadLevel，请勿无故加载快照。"
+                            )
+                        except Exception as e:
+                            logger.warning("SaveLevelAs 失败: %s", e)
+
+                elif best is not None:
+                    best_hist = best.get("histogram_correlation", 0)
+                    best_round = best.get("round", "?")
+                    body_lines.append("")
+                    body_lines.append(
+                        f"⚠ 当前直方图相似度 {hist:.2f} 低于最佳记录 "
+                        f"{best_hist:.2f}（第 {best_round} 轮）。"
+                        f"可能已越过最佳点，考虑回退到上一轮参数。"
+                    )
+
+                # 连续下降检测
+                prev_hist = _session_reference.get("_prev_hist")
+                if prev_hist is not None and hist < prev_hist:
+                    _decline = _session_reference.get("_decline_count", 0) + 1
+                    _session_reference["_decline_count"] = _decline
+                    if _decline >= 2:
+                        lines.append(
+                            "🔴 直方图相似度连续 2 轮下降，"
+                            "建议回退到上一轮参数并停止该方向调整。"
+                        )
+                else:
+                    _session_reference["_decline_count"] = 0
+                _session_reference["_prev_hist"] = hist
+            elif metrics_error:
+                body_lines.append(f"\n⚠ 量化指标计算失败: {metrics_error}")
+                body_lines.append("MiMo 分析仍然有效。")
+
+            body_lines.append("")
+            body_lines.append("---")
+            body_lines.append("")
             if _is_first_load:
-                lines.append(
+                body_lines.append(
                     "在存在参考图的任务里，每轮迭代请使用 "
                     f"match_reference(\"{ref_path_str}\") 获取对比反馈，"
                     "不要用 vision_ask 做氛围对比。"
                 )
-                lines.append("")
-            lines.append(
+                body_lines.append("")
+            body_lines.append(
                 "match_reference 每次返回量化指标（R/B、亮度、饱和度）——"
                 "这是确定性像素计算，不受 VLM 主观判断影响，是最可靠的调整指南针。"
             )
-            lines.append(
+            body_lines.append(
                 "⚠ MiMo 分析与量化指标方向一致 → 高置信；"
                 "不一致 → 以量化指标为准。"
             )
+
+            # 组装最终输出：header（含倒计时状态）+ body
+            _max_allowed = _session_reference.get("_max_allowed_rounds", 10)
+            _countdown = _session_reference.get("_countdown_remaining")
+
+            if _countdown is not None and _countdown > 0:
+                header_lines = [
+                    f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
+                    f"第 {_match_count} 轮（最多 {_max_allowed} 轮，"
+                    f"⏳ 直方图已达 0.70+，剩余 {_countdown} 次调整机会）",
+                ]
+            elif _countdown is not None and _countdown == 0:
+                header_lines = [
+                    f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
+                    f"第 {_match_count} 轮（最多 {_max_allowed} 轮，"
+                    f"⏳ 本轮为最后一次调整机会）",
+                ]
+            else:
+                header_lines = [
+                    f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
+                    f"第 {_match_count} 轮（最多 {_max_allowed} 轮）",
+                ]
+
+            lines = header_lines + body_lines
 
             result_text = "\n".join(lines)
             await _log_harness_call(name, arguments, result_text, duration_ms)
