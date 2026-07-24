@@ -14,17 +14,23 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 | 006 | Vision Pipeline (capturer + vision_agent) | ✅ 已接入 MCP 循环 |
 | 007 | 验证闭环 (VisionInterceptor → MCP 循环) | ✅ 三种截图 mode 成立，file fallback 就绪 |
 | 008 | State Cache (L1 write-through + L3 refresh) | ✅ 18 tests |
-| 009 | 任务记忆 | ⬜ 作废，重定义为轨迹记忆并入 ADR 0008，实现待 014 后另立 Issue |
-| 010 | 错误恢复 | ⬜ 跳过 |
+| 009 | 任务记忆 | ⬜ 作废，重定义为轨迹记忆并入 ADR 0008 |
+| 010 | 错误恢复 | ⬜ 跳过（已删除） | — |
 | 011 | 安全护栏 | ❌ 待开发 |
-| 012 | 连接健康检测 (ping + 自动重连) | ✅ 23 tests | 详见 docs/HANDOFF_0701_ISSUE_012_CONNECTION_HEALTH.md |
-| 013 | State Cache 磁盘持久化 | ⬜ 作废 (ADR 0008 信任模型倒转，文件已删) |
-| 014 | 闭环验收场景 demo | ⬜ 降级 (2026-07-07)：demo 是叙事素材非机制；指纹 Hard Boundary 已落地，L2 读回移入 016 | 详见 docs/issues/014-e2e-acceptance-scenario.md 头部降级说明 |
-| 015 | Vision 定向提问 (Session 化 vision_ask) | ✅ | 详见 docs/issues/015-vision-targeted-questioning.md |
-| 016 | L2 读回拦截器 + 参考图对比 | ❌ **当前里程碑** | 详见 docs/issues/016-readback-and-reference-image.md |
+| 012 | 连接健康检测 (ping + 自动重连) | ✅ 23 tests | docs/handoff/HANDOFF_0701_ISSUE_012_CONNECTION_HEALTH.md |
+| 013 | State Cache 磁盘持久化 | ⬜ 作废 (ADR 0008，文件已删) | — |
+| 014 | 闭环验收场景 demo | ⬜ 降级 (2026-07-07)，已删除 | — |
+| 015 | Vision 定向提问 (Session 化 vision_ask) | ✅ | docs/issues/015-vision-targeted-questioning.md |
+| 016 | L2 读回拦截器 + 参考图对比 | ❌ **当前里程碑** | docs/issues/016-readback-and-reference-image.md |
+| 017 | MCP 协议层公共化：结果解包 + 帧构造 | ❌ | docs/issues/017-mcp-result-unwrapping.md |
+| 018 | call_tool 注册表化：HarnessTool 分发替代 if 链 | ❌ | docs/issues/018-call-tool-registry.md |
+| 019 | match_reference 状态类化 + atmosphere 提取 | ❌ | docs/issues/019-reference-session-extract.md |
+| 020 | 命名规整：前缀+功能全面对齐 | ❌ | docs/issues/020-naming-convention-alignment.md |
+| 021 | 周边修复：Bug 修复 + 死代码清理 + CLI/Config | ❌ | docs/issues/021-bug-fixes-and-cleanup.md |
+| 022 | 文档同步：架构/契约/词汇表回标 | ❌ | docs/issues/022-documentation-sync.md |
 | — | LevelPersistenceToolset (fingerprint/dirty/save 五工具) | ✅ 直连验证通过 | UE 侧插件, `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset/`, 详见 docs/contracts.md §4 |
 
-**全量测试：331 passed + 4 skipped（2026-07-07）**
+**全量测试：331 passed + 4 skipped（2026-07-24，重构前基线）**
 
 **当前方向（2026-07-07 更新）**：项目第一定位是求职/作品集叙事，重心转向参考图机制——用参考图让 Vision 回答“参考图与现状的区别”，由主 LLM 拆解为可执行步骤，替代口头表述的不确定性（Issue 016 Part B）。其前置是 L2 读回验证（ReadbackInterceptor，写后自动读回 diff，ADR 0008 定义的正确性主通道，Issue 016 Part A）。原 Issue 014 demo 降级为素材性工作，若将来录制，数字对比基准为有/无 Harness 对照。UE 是世界状态唯一权威，WorldState 为带指纹校验的观测记录（ADR 0008）。UE 侧配套插件 LevelPersistenceToolset（fingerprint/dirty/save 五工具）位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset`，已直连验证通过。
 
@@ -34,7 +40,7 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 LLM (Claude Code) ←→ Harness MCP Server (:9000) ←→ UE MCP Server (:8000)
                         │
               Context Assembler (三层 prompt)
-              Interceptor Chain (DebugPreCall → Logger → StateCache → [Vision])
+              Interceptor Chain (DebugPreCall → Readback → Logger → StateCache → DriftAlert → Vision → SnapshotRecorder)
               State Cache (L1 write-through / L3 hard-boundary refresh)
               Skill Registry (YAML-based, ~/.ue-harness/skills/)
 ```
