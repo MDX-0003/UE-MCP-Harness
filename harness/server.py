@@ -29,8 +29,9 @@ from mcp.types import (
     Tool,
 )
 
-from harness.client import McpClientSession
+from harness.client import McpClientSession, mcp_extract_text, mcp_parse_result, mcp_unwrap_return_text, mcp_unwrap_return_value
 from harness.config import Config
+from harness.state.normalize import state_parse_actor_names
 from harness.context.filter import apply_filter
 from harness.context.prompt import (
     SystemContextProvider,
@@ -47,7 +48,6 @@ from harness.verification.vision_agent import (
     _call_vision_api,
     _extract_json_object,
 )
-from harness.verification.interceptor import _unwrap_return_value
 from harness.state.models import WorldState
 
 logger = logging.getLogger("harness.server")
@@ -138,8 +138,8 @@ def build_server(
                 "LevelPersistenceToolset.LevelPersistenceToolset.GetLevelFingerprint",
                 {"LevelPath": ""},
             )
-            parsed = _parse_raw_result(result)
-            text = _extract_parsed_text(parsed, result) or ""
+            parsed = mcp_parse_result(result)
+            text = mcp_extract_text(parsed, result) or ""
             rv = json.loads(text) if isinstance(text, str) else {}
             pkg_path = rv.get("packagePath", "") if isinstance(rv, dict) else ""
         except Exception:
@@ -896,8 +896,8 @@ def build_server(
                         "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
                         {"tag": "", "actor_type": {"refPath": class_path}},
                     )
-                    parsed = _parse_raw_result(result_text)
-                    actor_list = _extract_actor_names(parsed)
+                    parsed = mcp_parse_result(result_text)
+                    actor_list = state_parse_actor_names(parsed)
                     actors_found[actor_type] = actor_list
                     count = len(actor_list)
                     if count == 1:
@@ -941,12 +941,12 @@ def build_server(
                             "toolset_registry.toolsets.core.object.ObjectTools.list_properties",
                             {"instance": {"refPath": actor_name}},
                         )
-                        props_parsed = _parse_raw_result(props_result)
-                        props_text = _extract_parsed_text(
+                        props_parsed = mcp_parse_result(props_result)
+                        props_text = mcp_extract_text(
                             props_parsed, props_result,
                         )
                         # 解包可能的 returnValue 包装
-                        props_text = _unwrap_return_value_text(props_text or "")
+                        props_text = mcp_unwrap_return_text(props_text or "")
                         actor_prop_names = _extract_property_names(props_text)
 
                         # 2b. 解析 component 引用，递归获取 component 级属性
@@ -1172,8 +1172,8 @@ def build_server(
         duration_ms = (time.monotonic() - t_start) * 1000
 
         # === 解析（只做一次，各 interceptor 共享） ===
-        parsed_raw = _parse_raw_result(result_text)
-        parsed_text = _extract_parsed_text(parsed_raw, result_text)
+        parsed_raw = mcp_parse_result(result_text)
+        parsed_text = mcp_extract_text(parsed_raw, result_text)
 
         # === post 阶段 ===
         event = ToolCallCompleted(
@@ -1234,61 +1234,6 @@ def _b64_to_pil(b64: str) -> "Image.Image":
     import io as _io
     from PIL import Image as PILImage
     return PILImage.open(_io.BytesIO(base64.b64decode(b64))).convert("RGB")
-
-
-def _item_to_name(item: Any) -> str:
-    """从 find_actors 返回值元素中提取名称字符串."""
-    if isinstance(item, dict):
-        ref = item.get("refPath", "") or item.get("name", "") or item.get("Name", "")
-        if ref:
-            return str(ref)
-    return str(item)
-
-
-def _extract_actor_names(parsed: Any) -> list[str]:
-    """从 find_actors 返回值中提取 actor 名称列表.
-
-    处理两种格式：
-      1. MCP content 包裹（ue_client.call_tool 真实返回）:
-         {"content": [{"type": "text", "text": "{\\"returnValue\\": [...]}"}]}
-         其中 text 内层是 JSON 字符串，需二次解析。
-      2. 直接 dict（向后兼容旧测试 mock）:
-         {"returnValue": [...]}
-    """
-    # ---- 解包 MCP content 数组 ----
-    if isinstance(parsed, dict):
-        content = parsed.get("content", [])
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text = item.get("text", "")
-                    if text:
-                        try:
-                            inner = json.loads(text)
-                        except (json.JSONDecodeError, TypeError):
-                            continue
-                        if isinstance(inner, dict) and "returnValue" in inner:
-                            rv = inner["returnValue"]
-                            if isinstance(rv, list):
-                                return [_item_to_name(item) for item in rv if item]
-                        if isinstance(inner, list):
-                            return [_item_to_name(item) for item in inner if item]
-    # ---- 向后兼容：直接 dict / list 格式 ----
-    if isinstance(parsed, list):
-        return [str(item) for item in parsed if item]
-    if isinstance(parsed, dict):
-        for key in ("actors", "result", "data"):
-            val = parsed.get(key)
-            if isinstance(val, list):
-                return [_item_to_name(item) for item in val if item]
-        rv = parsed.get("returnValue")
-        if isinstance(rv, list):
-            return [_item_to_name(item) for item in rv if item]
-    # ---- 最终 fallback ----
-    text = str(parsed)
-    lines = text.strip().split("\n")
-    return [line.strip() for line in lines if line.strip()
-            and not line.startswith("{")]
 
 
 def _extract_property_names(parsed_text: str | None) -> list[str]:
@@ -1368,9 +1313,9 @@ async def _resolve_component_properties(
             "toolset_registry.toolsets.core.object.ObjectTools.get_properties",
             {"instance": {"refPath": actor_path}, "properties": suspect_fields},
         )
-        parsed = _parse_raw_result(result_text)
-        text = _extract_parsed_text(parsed, result_text) or ""
-        rv = _try_unwrap_return_value(text)
+        parsed = mcp_parse_result(result_text)
+        text = mcp_extract_text(parsed, result_text) or ""
+        rv = mcp_unwrap_return_value(text)
     except Exception:
         return (actor_prop_names, {}, {})
 
@@ -1397,9 +1342,9 @@ async def _resolve_component_properties(
                 "toolset_registry.toolsets.core.object.ObjectTools.list_properties",
                 {"instance": {"refPath": comp_refpath}},
             )
-            comp_parsed = _parse_raw_result(comp_result)
-            comp_text = _extract_parsed_text(comp_parsed, comp_result)
-            comp_text = _unwrap_return_value_text(comp_text or "")
+            comp_parsed = mcp_parse_result(comp_result)
+            comp_text = mcp_extract_text(comp_parsed, comp_result)
+            comp_text = mcp_unwrap_return_text(comp_text or "")
             comp_names = _extract_property_names(comp_text)
             comp_prop_names[comp_field] = comp_names
         except Exception as e:
@@ -1409,50 +1354,6 @@ async def _resolve_component_properties(
             comp_prop_names[comp_field] = []
 
     return (direct_props, component_refs, comp_prop_names)
-
-
-def _unwrap_return_value_text(text: str) -> str:
-    """If text is a ``{"returnValue": "..."}`` JSON wrapper, extract the inner value.
-
-    list_properties 返回值有两种格式：
-      1. 直接文本: ``"[75 fields] a, b, c"``
-      2. returnValue 包装: ``{"returnValue": "[75 fields] a, b, c"}``
-
-    此函数统一解包，返回内层字符串。
-    """
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return text
-    if isinstance(parsed, dict) and "returnValue" in parsed:
-        rv = parsed["returnValue"]
-        if isinstance(rv, str):
-            return rv
-        return json.dumps(rv) if isinstance(rv, dict) else str(rv)
-    return text
-
-
-def _try_unwrap_return_value(text: str) -> dict | None:
-    """尝试解包 returnValue JSON 包装.
-
-    格式: {"returnValue": "<json_string>"}
-    返回内层 JSON dict，或 None。
-    """
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if isinstance(parsed, dict) and "returnValue" in parsed:
-        rv = parsed["returnValue"]
-        if isinstance(rv, str):
-            try:
-                inner = json.loads(rv)
-                return inner if isinstance(inner, dict) else None
-            except (json.JSONDecodeError, TypeError):
-                return None
-        if isinstance(rv, dict):
-            return rv
-    return None
 
 
 def _build_property_index(
@@ -1725,39 +1626,3 @@ def _render_mapping_markdown(mapping: dict[str, Any]) -> str:
     lines.insert(1, f"共 {total} 个氛围相关属性")
     lines.insert(2, "")
     return "\n".join(lines)
-
-
-def _parse_raw_result(result_text: str | None) -> Any:
-    """解析 JSON-RPC result 文本为 Python 对象。"""
-    if result_text is None:
-        return None
-    if isinstance(result_text, str):
-        try:
-            return json.loads(result_text)
-        except json.JSONDecodeError:
-            return result_text
-    return result_text
-
-
-def _extract_parsed_text(parsed_raw: Any, fallback: str | None) -> str | None:
-    """从 MCP content array 格式中提取纯文本。
-
-    MCP 规范的工具结果格式：
-      {"content": [{"type": "text", "text": "..."}]}
-      {"content": [{"type": "image", "data": "base64...", "mimeType": "image/png"}]}
-
-    对于 image 类型，保留 raw_result 但 parsed_text 返回标记字符串。
-    """
-    if parsed_raw is None:
-        return fallback
-    if isinstance(parsed_raw, dict):
-        content = parsed_raw.get("content", [])
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                return item.get("text", "")
-            if isinstance(item, dict) and item.get("type") == "image":
-                return f"[image: {item.get('mimeType', 'unknown')}]"
-    # 回退到原始文本
-    if fallback is not None:
-        return fallback
-    return str(parsed_raw)

@@ -199,9 +199,94 @@ def _extract_payload(short_name: str, args: dict) -> dict:
     return {}
 
 
-def extract_short_name(full_name: str) -> str:
+def mcp_tool_short_name(full_name: str) -> str:
     """从全限定工具名中提取短名（如 set_actor_transform）。"""
     return full_name.split(".")[-1] if "." in full_name else full_name
+
+
+# 过渡别名（Issue 020 删除）
+extract_short_name = mcp_tool_short_name
+
+
+def state_parse_actor_names(result: str) -> list[str]:
+    """从 find_actors 返回值中解析 Actor 名称列表。
+
+    合并旧 _parse_actor_list (refresher) 与 _extract_actor_names (server)
+    的 fallback 行为——取两者并集以覆盖充分性优先。
+
+    支持格式：
+      - MCP content + returnValue 包装 + 对象列表 (dict with refPath)
+      - 直接 returnValue 对象列表
+      - 纯字符串列表
+      - 逗号分隔字符串
+      - actors/result/data 键降级
+      - 逐行文本 fallback
+    """
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else result
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    if isinstance(parsed, dict):
+        # MCP content 信封
+        content = parsed.get("content", [])
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    if text:
+                        try:
+                            data = json.loads(text)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        rv = _resolve_actor_list(data)
+                        if rv is not None:
+                            return rv
+        # 直接 dict 格式（向后兼容旧测试 mock）
+        for key in ("actors", "result", "data"):
+            val = parsed.get(key)
+            if isinstance(val, list):
+                return [str(item) for item in val if item]
+        rv = parsed.get("returnValue")
+        if rv is not None:
+            inner = _resolve_actor_list(rv)
+            if inner is not None:
+                return inner
+        # 内联 returnValue（非 content 路径，如旧测试）
+        if "returnValue" in parsed:
+            inner = _resolve_actor_list(parsed)
+            if inner is not None:
+                return inner
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if item]
+    # 逐行文本 fallback
+    text = str(parsed)
+    lines = text.strip().split("\n")
+    return [line.strip() for line in lines if line.strip()
+            and not line.startswith("{")]
+
+
+def _resolve_actor_list(data: Any) -> list[str] | None:
+    """从 returnValue 解包后的数据中提取 actor 名列表。不属于此格式返回 None。"""
+    if isinstance(data, dict) and "returnValue" in data:
+        data = data["returnValue"]
+    if isinstance(data, list):
+        if not data:
+            return []
+        if isinstance(data[0], dict):
+            names: list[str] = []
+            for obj in data:
+                ref = obj.get("refPath", "") if isinstance(obj, dict) else ""
+                if ref:
+                    actor_name, _ = _parse_ref_path(ref)
+                    if actor_name:
+                        names.append(actor_name)
+            return names
+        return [str(n) for n in data]
+    if isinstance(data, str):
+        # 逗号分隔字符串
+        return [n.strip() for n in data.split(",") if n.strip()]
+    return None
 
 
 # ---- class_name 推断 ----

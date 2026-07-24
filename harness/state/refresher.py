@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from harness.state.normalize import state_parse_actor_names
+
 if TYPE_CHECKING:
     from harness.client import McpClientSession
     from harness.state.models import WorldState
@@ -46,7 +48,7 @@ async def full_refresh(
             "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
             {"glob": "*"},
         )
-        actor_names = _parse_actor_list(result)
+        actor_names = state_parse_actor_names(result)
         for name in actor_names:
             if name not in cache.actors:
                 from harness.state.models import ActorSnapshot
@@ -64,7 +66,7 @@ async def full_refresh(
             "ToolsetRegistry.EditorAppToolset.GetSelectedActors",
             {},
         )
-        cache.selected_actors = _parse_actor_list(result)
+        cache.selected_actors = state_parse_actor_names(result)
     except Exception as e:
         logger.warning("获取选中 Actor 失败: %s", e)
 
@@ -78,54 +80,6 @@ async def full_refresh(
     actor_count = sum(1 for a in cache.actors.values() if not a.deleted)
     logger.info("L3 刷新完成: 地图=%s, Actor=%d, 选中=%d",
                  cache.map_path, actor_count, len(cache.selected_actors))
-
-
-def _parse_actor_list(result: str) -> list[str]:
-    """从工具返回值中解析 Actor 名称列表。
-
-    支持三种返回格式：
-      1. returnValue 包装的对象列表: {"returnValue": [{"refPath": "/Game/.../SpotLight_0"}, ...]}
-      2. 纯字符串列表: ["SpotLight_0", "PointLight_1"]
-      3. 逗号分隔字符串: "SpotLight_0, PointLight_1"
-    """
-    import json
-    from harness.state.normalize import _parse_ref_path
-
-    try:
-        parsed = json.loads(result) if isinstance(result, str) else result
-        if isinstance(parsed, dict):
-            content = parsed.get("content", [])
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text = item.get("text", "")
-                    try:
-                        data = json.loads(text)
-
-                        # 格式 1: returnValue 包装
-                        if isinstance(data, dict) and "returnValue" in data:
-                            data = data["returnValue"]
-
-                        if isinstance(data, list):
-                            if not data:
-                                return []
-                            # 格式 1: 对象列表 → 从 refPath 提取名字
-                            if isinstance(data[0], dict):
-                                names: list[str] = []
-                                for obj in data:
-                                    ref = obj.get("refPath", "") if isinstance(obj, dict) else ""
-                                    if ref:
-                                        name, _ = _parse_ref_path(ref)
-                                        if name:
-                                            names.append(name)
-                                return names
-                            # 格式 2: 纯字符串列表
-                            return [str(n) for n in data]
-                    except json.JSONDecodeError:
-                        # 格式 3: 逗号分隔字符串
-                        return [n.strip() for n in text.split(",") if n.strip()]
-    except json.JSONDecodeError:
-        pass
-    return []
 
 
 def _extract_level_path(result: str) -> str:

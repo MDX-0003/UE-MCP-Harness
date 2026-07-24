@@ -22,6 +22,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, TYPE_CHECKING
 
+from harness.client import mcp_extract_text, mcp_unwrap_return_value
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
 from harness.state.models import WorldState
 from harness.state.normalize import extract_short_name, normalize_tool_args
@@ -296,7 +297,7 @@ def _parse_readback_result(short: str, result_text: str) -> dict | list:
         return {}
 
     # 提取内层文本（MCP content[0].text 或 raw 本身）
-    text = _unwrap_mcp_text(raw)
+    text = mcp_extract_text(raw)
 
     # 按工具类型解析内层值
     if short == "set_actor_transform":
@@ -308,45 +309,6 @@ def _parse_readback_result(short: str, result_text: str) -> dict | list:
     return {}
 
 
-def _unwrap_mcp_text(raw: dict) -> str:
-    """从 MCP 响应中提取 text 内容。
-
-    支持两种格式：
-      - MCP content array: {"content": [{"type": "text", "text": "..."}]}
-      - 直接 text 字符串
-    """
-    if isinstance(raw, dict):
-        content = raw.get("content", [])
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    return item.get("text", "")
-    return str(raw)
-
-
-def _unwrap_return_value(text: str) -> dict | None:
-    """尝试解包 ToolsetRegistry 的 returnValue 包装。
-
-    格式: {"returnValue": "<json_string>"}
-    返回内层 JSON dict，或 None 表示不是 returnValue 格式。
-    """
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if isinstance(parsed, dict) and "returnValue" in parsed:
-        rv = parsed["returnValue"]
-        if isinstance(rv, str):
-            try:
-                inner = json.loads(rv)
-                return inner if isinstance(inner, dict) else None
-            except (json.JSONDecodeError, TypeError):
-                return None
-        if isinstance(rv, dict):
-            return rv
-    return None
-
-
 def _parse_transform_readback(raw: dict, text: str) -> dict:
     """解析 get_actor_transform 的返回值。
 
@@ -354,7 +316,7 @@ def _parse_transform_readback(raw: dict, text: str) -> dict:
     最后检查 raw 本身是否是 Transform-like dict。
     """
     # 尝试 returnValue 解包
-    rv = _unwrap_return_value(text)
+    rv = mcp_unwrap_return_value(text)
     if rv is not None:
         return rv
 
@@ -378,7 +340,7 @@ def _parse_properties_readback(text: str) -> dict:
 
     优先从 returnValue 解包，其次直接从 text 解析 JSON。
     """
-    rv = _unwrap_return_value(text)
+    rv = mcp_unwrap_return_value(text)
     if rv is not None:
         return rv
 

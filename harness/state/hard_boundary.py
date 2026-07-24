@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from harness.client import mcp_extract_text
+
 if TYPE_CHECKING:
     from harness.client import McpClientSession
     from harness.state.models import WorldState
@@ -169,26 +171,6 @@ async def execute_hard_boundary(
     return result
 
 
-def _unwrap_tool_result(raw: str) -> str:
-    """从 MCP tools/call 返回值中提取纯文本结果。
-
-    UE MCP 返回格式: {"content": [{"type": "text", "text": "..."}], ...}
-    LevelPersistenceToolset 工具在 text 中进一步编码为 '{"returnValue":"<json>"}'。
-    本函数剥离最外层 MCP 包装，返回内层 text 字符串（可能是 JSON，也可能不是）。
-    """
-    try:
-        outer = json.loads(raw) if isinstance(raw, str) else raw
-    except json.JSONDecodeError:
-        return raw
-
-    if isinstance(outer, dict):
-        content = outer.get("content", [])
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                return item.get("text", "")
-    return raw
-
-
 async def _get_current_fingerprint(ue_client: McpClientSession) -> dict | None:
     """调用 GetLevelFingerprint 获取当前关卡指纹。
 
@@ -196,7 +178,7 @@ async def _get_current_fingerprint(ue_client: McpClientSession) -> dict | None:
     """
     try:
         raw = await ue_client.call_tool(_GET_FINGERPRINT, {"LevelPath": ""})
-        text = _unwrap_tool_result(raw)
+        text = mcp_extract_text(raw)
         # text = '{"returnValue":"{\\"packagePath\\":\\"...\\"}"}'
         wrapper = json.loads(text)
         inner_str = wrapper.get("returnValue", text)
@@ -210,7 +192,7 @@ async def _get_dirty_packages(ue_client: McpClientSession) -> list[str]:
     """调用 ListDirtyPackages 获取脏包列表。"""
     try:
         raw = await ue_client.call_tool(_LIST_DIRTY, {})
-        text = _unwrap_tool_result(raw)
+        text = mcp_extract_text(raw)
         # text = '{"returnValue":"[\\"/Script/...\\"]"}'
         wrapper = json.loads(text)
         inner = wrapper.get("returnValue", text)

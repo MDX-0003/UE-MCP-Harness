@@ -84,6 +84,79 @@ def _extract_text_from_result(result_str: str) -> str:
     return ""
 
 
+# ---- MCP 结果解包（公共入口，全仓统一调用） --------------------------------
+
+
+def mcp_parse_result(raw: str | Any | None) -> Any:
+    """解析 JSON-RPC result 为 Python 对象。JSON 字符串尝试 parse，否则原样返回。"""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+    return raw
+
+
+def mcp_extract_text(raw: str | Any | None, fallback: str | None = None) -> str | None:
+    """从 MCP content array 提取首个 text 内容。
+
+    格式: {"content": [{"type": "text", "text": "..."}, ...]}
+    遇 image 类型返回 "[image: mimeType]" 标记文本。
+    """
+    parsed = mcp_parse_result(raw)
+    if parsed is None:
+        return fallback
+    if isinstance(parsed, dict):
+        content = parsed.get("content", [])
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                return item.get("text", "")
+            if isinstance(item, dict) and item.get("type") == "image":
+                return f"[image: {item.get('mimeType', 'unknown')}]"
+    if fallback is not None:
+        return fallback
+    return str(parsed)
+
+
+def mcp_unwrap_return_value(text: str) -> dict | None:
+    """解包 ToolsetRegistry returnValue 包装。
+
+    格式: {"returnValue": "<json_string>"}
+    返回内层 dict 或 None（表示不是 returnValue 格式）。
+    """
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(parsed, dict) and "returnValue" in parsed:
+        rv = parsed["returnValue"]
+        if isinstance(rv, str):
+            try:
+                inner = json.loads(rv)
+                return inner if isinstance(inner, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                return None
+        if isinstance(rv, dict):
+            return rv
+    return None
+
+
+def mcp_unwrap_return_text(text: str) -> str:
+    """解包 returnValue JSON 包装，返回内层字符串。非 returnValue 格式时原样返回。"""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+    if isinstance(parsed, dict) and "returnValue" in parsed:
+        rv = parsed["returnValue"]
+        if isinstance(rv, str):
+            return rv
+        return json.dumps(rv) if isinstance(rv, dict) else str(rv)
+    return text
+
+
 # ---- JSON-RPC 2.0 消息 ----------------------------------------------------
 
 
