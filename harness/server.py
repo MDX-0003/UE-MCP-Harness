@@ -42,13 +42,16 @@ from harness.context.prompt import (
 from harness.context.provider import ContextProvider
 from harness.context.skill_registry import SkillRegistry
 from harness.interceptor import ToolCallCompleted
-from harness.verification.vision_agent import (
-    VISION_SYSTEM_PROMPT,
-    VisionSubAgent,
-    _call_vision_api,
-    _extract_json_object,
-)
 from harness.state.models import WorldState
+from harness.tools import ToolContext, HarnessTool, tool_ok, tool_fail, log_local_call, emit_local_event, require_vision_manager, VISION_BADGES
+from harness.context.skill_tools import (
+    handle_activate_skill, handle_save_skill, handle_get_context, handle_deactivate_skill,
+    _parse_skill_yaml_to_dict, _list_skill_names,
+)
+from harness.verification.vision_tools import (
+    handle_vision_screenshot, handle_vision_ask, handle_vision_tell,
+    handle_vision_reset, handle_vision_status,
+)
 
 logger = logging.getLogger("harness.server")
 
@@ -101,28 +104,6 @@ def build_server(
     skill_registry = SkillRegistry(skills_dir=_skills_dir)
     skill_registry.load_skills()
 
-    def _list_skill_names() -> str:
-        skills = skill_registry.list_skills()
-        if not skills:
-            return "(无可用 Skill)"
-        return ", ".join(f"{s.name}({s.description[:30]}...)" if len(s.description) > 30
-                         else f"{s.name}({s.description})" for s in skills)
-
-    def _parse_skill_yaml_to_dict(yaml_text: str) -> dict:
-        """将原始 YAML 文本解析为与 evening-lighting.yaml 格式兼容的 dict。"""
-        import yaml
-        from harness.context.skill_registry import _normalize_list
-        parsed = yaml.safe_load(yaml_text) or {}
-        if not isinstance(parsed, dict):
-            return {"name": "", "description": "", "triggers": [], "tools_allowlist": [], "steps": ""}
-        return {
-            "name": str(parsed.get("name", "")),
-            "description": str(parsed.get("description", "")),
-            "triggers": _normalize_list(parsed.get("triggers", [])),
-            "tools_allowlist": _normalize_list(parsed.get("tools_allowlist", [])),
-            "steps": str(parsed.get("steps", "")),
-        }
-
     async def _ensure_best_snapshot_path(ue, session_ref: dict) -> str:
         """构造快照路径: {当前关卡目录}/{MMDD}-{关卡名}.umap。
 
@@ -168,6 +149,685 @@ def build_server(
             TaskContextProvider(),  # 005: 当 _active_skill 非 None 时注入 Tier 2
         ]
 
+    # ---- ToolContext (依赖注入容器, Issue 018) ----
+    from harness.tools import ToolContext as _ToolContext
+    _ctx = _ToolContext(
+        config=config,
+        ue_client=ue_client,
+        world_state=world_state,
+        skill_registry=skill_registry,
+        skill_ref=skill_ref,
+        context_providers=context_providers,
+        snapshot_recorder=snapshot_recorder,
+        pending_screenshot_ref=pending_screenshot_ref,
+        vision_session_manager=vision_session_manager,
+        stop_limit=_stop_limit,
+        post_interceptors=interceptors,
+    )
+
+    # 查找 ToolCallLogger 并挂到 _ctx（Issue 021 将改为 is 类型检查）
+    for ic in interceptors:
+        if ic.__class__.__name__ == "ToolCallLogger":
+            _ctx.tool_logger = ic
+            break
+
+    # ---- 参考图 handlers (Plan 0708, Issue 018) ----
+
+    async def _handle_match_reference(ctx: ToolContext, arguments: dict) -> CallToolResult:
+        nonlocal _session_reference, _session_mapping_generated, _is_first_load, _stop_limit
+        from harness.verification.vision_agent import VisionSubAgent
+        t0 = time.monotonic()
+        ref_path_str = arguments.get("path", "")
+
+        # Phase 3: 硬终止检查（倒计时归零 或 总轮次兜底）
+        _match_count = _session_reference.get("_match_count", 0)
+        _countdown = _session_reference.get("_countdown_remaining")
+        _max_allowed = _session_reference.get("_max_allowed_rounds", 10)
+
+        should_stop = False
+        stop_reason = ""
+
+        if _countdown is not None and _countdown < 0:
+            should_stop = True
+            stop_reason = (
+                "倒计时已归零"
+                "（直方图≥0.70 达成后已用尽 3 次调整机会）"
+            )
+        elif _countdown is None and _match_count >= _max_allowed:
+            should_stop = True
+            stop_reason = f"已达到最大轮次限制（{_max_allowed} 轮）"
+
+        if should_stop and _stop_limit is not None:
+            best_path = _session_reference.get("best_snapshot_path")
+            summary = _stop_limit.build_summary(
+                _session_reference, best_path, stop_reason,
+            )
+            duration_ms = (time.monotonic() - t0) * 1000
+            log_local_call(ctx, "match_reference", arguments, summary, t0)
+            return CallToolResult(
+                content=[TextContent(type="text", text=summary)],
+                isError=True,
+            )
+
+        # 1. 加载参考图
+        try:
+            from PIL import Image as PILImage
+            from pathlib import Path as _Path
+            ref_path = _Path(ref_path_str).expanduser().resolve()
+            if not ref_path.exists():
+                return CallToolResult(content=[TextContent(
+                    type="text", text=f"参考图不存在: {ref_path}",
+                )], isError=True)
+            ref_img = PILImage.open(ref_path).convert("RGB")
+        except Exception as e:
+            return CallToolResult(content=[TextContent(
+                type="text", text=f"加载参考图失败: {e}",
+            )], isError=True)
+
+        # 2. 截当前视口
+        try:
+            from harness.verification.capturer import capture as capturer_capture
+            max_w, max_h = config.vision_max_size
+            screenshot = await capturer_capture(
+                ue_client, max_w, max_h, mode="viewport",
+            )
+            cur_b64 = screenshot.data_b64
+        except Exception as e:
+            return CallToolResult(content=[TextContent(
+                type="text", text=f"截图失败: {e}",
+            )], isError=True)
+
+        # 3. 参考图 → base64
+        import io as _io
+        buf = _io.BytesIO()
+        ref_img.save(buf, format="PNG")
+        ref_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        _is_first_load = _session_reference.get("_loaded") is None
+        _prev_path = _session_reference.get("path", "")
+        _is_new_reference = (str(ref_path) != _prev_path)
+
+        if _is_new_reference and not _is_first_load:
+            # 换了参考图 → 重置所有累积状态
+            _session_reference = {"_loaded": True}
+            _is_first_load = True
+
+        _session_reference.update({"b64": ref_b64, "path": str(ref_path), "_loaded": True})
+
+        # 递增 match_reference 调用计数（Phase 1）
+        _match_count = _session_reference.get("_match_count", 0) + 1
+        _session_reference["_match_count"] = _match_count
+
+        # 4. 量化指标
+        from harness.verification.metrics import compute_match_metrics
+        try:
+            cur_img = _b64_to_pil(cur_b64)
+        except Exception:
+            cur_img = None
+
+        metrics_error: str | None = None
+        metrics_result = None
+        if cur_img is not None:
+            try:
+                metrics_result = compute_match_metrics(ref_img, cur_img)
+                _session_reference["metrics"] = metrics_result
+            except Exception as e:
+                logger.warning("量化指标计算失败（非致命）: %s", e)
+                metrics_error = str(e)
+        else:
+            metrics_error = "当前截图无法解码为 PIL Image"
+
+        # 4b. 趋势对比（vs 上一次 match_reference 调用）
+        prev_metrics = _session_reference.get("prev_metrics")
+        trend_lines: list[str] = []
+        if prev_metrics is not None and metrics_result is not None:
+            trend_lines = _build_trend_summary(prev_metrics, metrics_result)
+        # 保存本次结果供下次对比
+        _session_reference["prev_metrics"] = metrics_result
+
+        # 5. MiMo 9 维度双图对比
+        question = (
+            "请从以下 9 个维度比较当前截图与参考图的差异。"
+            "每个维度只输出方向性判定，不需要描述绝对值：\n\n"
+            "亮度 (Brightness):       darker / similar / brighter\n"
+            "对比度 (Contrast):       lower / similar / higher\n"
+            "色温 (Color Temperature): cooler / similar / warmer\n"
+            "色调偏移 (Color Cast):    none / 偏X色\n"
+            "饱和度 (Saturation):      less_saturated / similar / more_saturated\n"
+            "大气密度 (Haze):          clearer / similar / hazier\n"
+            "阴影方向 (Shadow Direction): 方向描述 + 是否一致\n"
+            "天空表现 (Sky):           颜色/云量/渐变的差异方向\n"
+            "视角方向 (Viewpoint Direction): looking_more_up / similar / looking_more_down\n\n"
+            "注意：视角方向只比较相机俯仰角（向上看 vs 向下看），"
+            "不考虑相机距离和目标对象。"
+            "如果两张图拍摄的是完全不同的场景/对象，填 'different_scene'。\n\n"
+            "每个判定配一句话佐证（你看到什么让你这样判断）。"
+        )
+
+        agent = VisionSubAgent(config)
+        try:
+            verdict = await agent.compare_with_reference(ref_b64, cur_b64, question)
+        except Exception as e:
+            duration_ms = (time.monotonic() - t0) * 1000
+            err_text = f"match_reference Vision 调用失败: {e}"
+            log_local_call(ctx, "match_reference", arguments, err_text, t0, error=e)
+            return CallToolResult(content=[TextContent(
+                type="text", text=err_text,
+            )], isError=True)
+
+        # 6. 组装返回文本（正文先行，header 在倒计时激活后 prepend）
+        duration_ms = (time.monotonic() - t0) * 1000
+        ref_w, ref_h = ref_img.size
+
+        body_lines: list[str] = []
+        if trend_lines:
+            body_lines.extend(trend_lines)
+        body_lines.append("")
+
+        body_lines.append("MiMo 9 维度差异：")
+        body_lines.append(verdict.answer)
+        _badges = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+        body_lines.append(
+            f"置信度: {_badges.get(verdict.confidence, '🟡')} "
+            f"{verdict.confidence}"
+        )
+        if verdict.observations:
+            body_lines.append("")
+            body_lines.append("分项观察：")
+            for obs in verdict.observations:
+                what = obs.get("what", "")
+                finding = obs.get("finding", "")
+                conf = obs.get("confidence", "medium")
+                ob = _badges.get(conf, "~")
+                body_lines.append(f"  {ob} {what}: {finding}")
+
+        if metrics_result:
+            m = metrics_result
+
+            hist = m["histogram_correlation"]
+            rb_cur = m["color_temperature"]["cur_r_b_ratio"]
+
+            # Phase 1: 倒计时激活（hist≥0.70 首次达成时）
+            _countdown = _session_reference.get("_countdown_remaining")
+            if _countdown is None and hist >= 0.70:
+                _session_reference["_countdown_remaining"] = 3
+                _session_reference["_countdown_start_round"] = _match_count
+                _session_reference["_max_allowed_rounds"] = _match_count + 3
+
+            # 倒计时递减
+            if _session_reference.get("_countdown_remaining") is not None:
+                _session_reference["_countdown_remaining"] -= 1
+
+            body_lines.append("")
+            body_lines.append("量化指标（全图统计，不受视点移动影响）：")
+            body_lines.append(f"{'':>12} {'参考图':>8} {'当前':>8} {'差异':>10}")
+            body_lines.append(
+                f"{'亮度':>12} {m['luminance']['ref']:>8.1f} "
+                f"{m['luminance']['cur']:>8.1f} {m['luminance']['delta_pct']:>+9.1f}%"
+            )
+            body_lines.append(
+                f"{'对比度':>12} {m['contrast']['ref']:>8.1f} "
+                f"{m['contrast']['cur']:>8.1f} {m['contrast']['delta_pct']:>+9.1f}%"
+            )
+            ct = m["color_temperature"]
+            body_lines.append(
+                f"{'色温':>12} {'R/B=' + str(ct['ref_r_b_ratio']):>8} "
+                f"{'R/B=' + str(ct['cur_r_b_ratio']):>8}"
+            )
+            body_lines.append(
+                f"{'饱和度':>12} {m['saturation']['ref']:>8.1f} "
+                f"{m['saturation']['cur']:>8.1f} {m['saturation']['delta_pct']:>+9.1f}%"
+            )
+            body_lines.append(
+                f"{'直方图相似度':>12} {'':>8} {'':>8} "
+                f"{m['histogram_correlation']:>10.2f} (0→完全不同, 1→完全一致)"
+            )
+
+            # Phase 1c: 最佳点追踪 + 连续下降检测
+            best = _session_reference.get("best_metrics")
+            if best is None or hist > best.get("histogram_correlation", 0):
+                _session_reference["best_metrics"] = {
+                    "histogram_correlation": hist,
+                    "round": _session_reference.get("_match_count", 0),
+                    "rb_ratio": rb_cur,
+                }
+                body_lines.append("")
+                body_lines.append(
+                    f"🏆 新最佳记录：直方图相似度 {hist:.2f}"
+                    f"（第 {_session_reference['best_metrics']['round']} 轮）"
+                )
+
+                # Phase 2: 最佳状态快照（仅首次跨过 0.70 时保存一次）
+                if hist >= 0.70 and not _session_reference.get("_snapshot_saved"):
+                    _session_reference["_snapshot_saved"] = True
+                    snapshot_path = await _ensure_best_snapshot_path(
+                        ue_client, _session_reference,
+                    )
+                    try:
+                        await ue_client.call_tool(
+                            "LevelPersistenceToolset.LevelPersistenceToolset.SaveLevelAs",
+                            {"TargetPath": snapshot_path},
+                        )
+                        _session_reference["best_snapshot_path"] = snapshot_path
+                        body_lines.append("")
+                        body_lines.append(
+                            f"💾 快照已保存至 {snapshot_path}，编辑器仍在原关卡。"
+                            f"仅当需要回退错误操作时才调 LoadLevel，请勿无故加载快照。"
+                        )
+                    except Exception as e:
+                        logger.warning("SaveLevelAs 失败: %s", e)
+
+            elif best is not None:
+                best_hist = best.get("histogram_correlation", 0)
+                best_round = best.get("round", "?")
+                body_lines.append("")
+                body_lines.append(
+                    f"⚠ 当前直方图相似度 {hist:.2f} 低于最佳记录 "
+                    f"{best_hist:.2f}（第 {best_round} 轮）。"
+                    f"可能已越过最佳点，考虑回退到上一轮参数。"
+                )
+
+            # 连续下降检测
+            prev_hist = _session_reference.get("_prev_hist")
+            if prev_hist is not None and hist < prev_hist:
+                _decline = _session_reference.get("_decline_count", 0) + 1
+                _session_reference["_decline_count"] = _decline
+                if _decline >= 2:
+                    lines.append(
+                        "🔴 直方图相似度连续 2 轮下降，"
+                        "建议回退到上一轮参数并停止该方向调整。"
+                    )
+            else:
+                _session_reference["_decline_count"] = 0
+            _session_reference["_prev_hist"] = hist
+        elif metrics_error:
+            body_lines.append(f"\n⚠ 量化指标计算失败: {metrics_error}")
+            body_lines.append("MiMo 分析仍然有效。")
+
+        body_lines.append("")
+        body_lines.append("---")
+        body_lines.append("")
+        if _is_first_load:
+            body_lines.append(
+                "在存在参考图的任务里，每轮迭代请使用 "
+                f"match_reference(\"{ref_path_str}\") 获取对比反馈，"
+                "不要用 vision_ask 做氛围对比。"
+            )
+            body_lines.append("")
+        body_lines.append(
+            "match_reference 每次返回量化指标（R/B、亮度、饱和度）——"
+            "这是确定性像素计算，不受 VLM 主观判断影响，是最可靠的调整指南针。"
+        )
+        body_lines.append(
+            "⚠ MiMo 分析与量化指标方向一致 → 高置信；"
+            "不一致 → 以量化指标为准。"
+        )
+
+        # 组装最终输出：header（含倒计时状态）+ body
+        _max_allowed = _session_reference.get("_max_allowed_rounds", 10)
+        _countdown = _session_reference.get("_countdown_remaining")
+
+        if _countdown is not None and _countdown > 0:
+            header_lines = [
+                f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
+                f"第 {_match_count} 轮（最多 {_max_allowed} 轮，"
+                f"⏳ 直方图已达 0.70+，剩余 {_countdown} 次调整机会）",
+            ]
+        elif _countdown is not None and _countdown == 0:
+            header_lines = [
+                f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
+                f"第 {_match_count} 轮（最多 {_max_allowed} 轮，"
+                f"⏳ 本轮为最后一次调整机会）",
+            ]
+        else:
+            header_lines = [
+                f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
+                f"第 {_match_count} 轮（最多 {_max_allowed} 轮）",
+            ]
+
+        lines = header_lines + body_lines
+
+        result_text = "\n".join(lines)
+        log_local_call(ctx, "match_reference", arguments, result_text, t0)
+        return CallToolResult(content=[TextContent(type="text", text=result_text)])
+
+
+    async def _handle_build_atmosphere_mapping(ctx: ToolContext, arguments: dict) -> CallToolResult:
+        nonlocal _session_mapping_generated
+        from harness.verification.vision_agent import VisionSubAgent
+        t0 = time.monotonic()
+
+        # 5 类氛围组件的 UE 类引用
+        # 使用 actor_type (class refPath) 而非 glob:
+        # UE find_actors 的 glob 匹配对长模式不可靠,
+        # "*DirectionalLight*" 返回空但 "*Light*" 能找到,
+        # class 引用是精确匹配, 无此问题.
+        # 详见 docs/handoff/find_actors_glob_issue.md
+        ATMOSPHERE_TYPES: dict[str, str] = {
+            "DirectionalLight": "/Script/Engine.DirectionalLight",
+            "SkyAtmosphere": "/Script/Engine.SkyAtmosphere",
+            "ExponentialHeightFog": "/Script/Engine.ExponentialHeightFog",
+            "VolumetricCloud": "/Script/Engine.VolumetricCloud",
+            "PostProcessVolume": "/Script/Engine.PostProcessVolume",
+        }
+
+        # Step 1: 扫描 5 类组件
+        scan_lines: list[str] = []
+        actors_found: dict[str, list[str]] = {}
+
+        for actor_type, class_path in ATMOSPHERE_TYPES.items():
+            try:
+                result_text = await ue_client.call_tool(
+                    "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
+                    {"tag": "", "actor_type": {"refPath": class_path}},
+                )
+                parsed = mcp_parse_result(result_text)
+                actor_list = state_parse_actor_names(parsed)
+                actors_found[actor_type] = actor_list
+                count = len(actor_list)
+                if count == 1:
+                    scan_lines.append(f"  {actor_type}: 1 个 ({actor_list[0]})")
+                elif count > 1:
+                    scan_lines.append(
+                        f"  {actor_type}: {count} 个 "
+                        f"({', '.join(actor_list[:3])}"
+                        f"{'...' if count > 3 else ''}) ⚠ 多实例，需确认"
+                    )
+                else:
+                    scan_lines.append(
+                        f"  {actor_type}: 未找到"
+                    )
+            except Exception as e:
+                scan_lines.append(f"  {actor_type}: 查询失败 ({e})")
+
+        # 缺失组件汇总提示（一次性，不给 LLM 逐个下达操作指令的机会）
+        missing_types = [
+            at for at, names in actors_found.items() if not names
+        ]
+        if missing_types:
+            scan_lines.append("")
+            scan_lines.append(
+                f"提示: {len(missing_types)} 类组件未找到"
+                f"（{', '.join(missing_types)}）。"
+                f"如需创建，使用 add_to_scene_from_class。"
+            )
+
+        # Step 2: 构建属性索引（含 component 子对象递归 + refPath 溯源）
+        property_index: list[dict] = []
+        next_idx = 1
+
+        for actor_type, actor_names in actors_found.items():
+            if not actor_names:
+                continue
+            for actor_name in actor_names[:1]:
+                try:
+                    # 2a. 获取 actor 顶层属性名
+                    props_result = await ue_client.call_tool(
+                        "toolset_registry.toolsets.core.object.ObjectTools.list_properties",
+                        {"instance": {"refPath": actor_name}},
+                    )
+                    props_parsed = mcp_parse_result(props_result)
+                    props_text = mcp_extract_text(
+                        props_parsed, props_result,
+                    )
+                    # 解包可能的 returnValue 包装
+                    props_text = mcp_unwrap_return_text(props_text or "")
+                    actor_prop_names = _extract_property_names(props_text)
+
+                    # 2b. 解析 component 引用，递归获取 component 级属性
+                    direct_props, component_refs, comp_prop_names = \
+                        await _resolve_component_properties(
+                            ue_client, actor_name, actor_prop_names,
+                        )
+
+                    # 2c. 构建索引条目（component 指针字段被其子属性替换）
+                    entries, next_idx = _build_property_index(
+                        actor_type=actor_type,
+                        actor_name=actor_name,
+                        actor_prop_names=actor_prop_names,
+                        component_refs=component_refs,
+                        comp_prop_names=comp_prop_names,
+                        start_index=next_idx,
+                    )
+                    property_index.extend(entries)
+                except Exception as e:
+                    logger.warning(
+                        "获取 %s 属性列表失败: %s", actor_name, e,
+                    )
+
+        # Step 3: 组装 MiMo 分类 prompt（索引模式——MiMo 只输出整数）
+        prompt = _build_mimo_prompt(property_index)
+
+        # Step 4: MiMo 分类 + 索引解析
+        agent = VisionSubAgent(config)
+        try:
+            mimo_output = await agent.classify(prompt)
+            mapping = _resolve_mimo_indices(mimo_output, property_index)
+        except ValueError as e:
+            duration_ms = (time.monotonic() - t0) * 1000
+            err_text = f"MiMo 分类失败: {e}"
+            # 降级：返回原始属性索引列表（含 refPath 标注）
+            fallback_lines = [
+                "⚠ MiMo 分类失败，以下是原始属性索引列表。",
+                "请 LLM 自行筛选氛围相关属性并调整。",
+                "",
+                "| 索引 | 组件 | 属性位置 (refPath) | 属性 |",
+                "|------|------|-------------------|------|",
+            ]
+            for entry in property_index:
+                short_ref = (
+                    entry["refPath"].split(":")[-1]
+                    if ":" in entry["refPath"]
+                    else entry["refPath"]
+                )
+                fallback_lines.append(
+                    f"| {entry['index']} | {entry['actor_type']} "
+                    f"| `{short_ref}` | {entry['property']} |"
+                )
+            log_local_call(
+                ctx, "build_atmosphere_mapping", arguments,
+                f"MiMo 失败，返回原始属性索引列表 ({err_text})",
+                t0, error=e,
+            )
+            return CallToolResult(content=[TextContent(
+                type="text", text="\n".join(fallback_lines),
+            )])
+
+        # Step 5: JSON → Markdown 表格
+        md_content = _render_mapping_markdown(mapping)
+        total_props = sum(
+            len(props) for props in mapping.values()
+            if isinstance(props, list)
+        )
+
+        # Step 6: 写入文件（fallback 路径）
+        mapping_path = ""
+        if snapshot_recorder is not None:
+            try:
+                from pathlib import Path as _Path
+                log_base = config.log_dir
+                session_name = getattr(
+                    snapshot_recorder, "_snapshot_dir", None,
+                )
+                if session_name is not None:
+                    session_name = _Path(getattr(
+                        session_name, "name", "",  # noqa — defensive
+                    ))
+                    # snapshot_recorder._snapshot_dir is a Path
+                    pass
+                mapping_path = str(log_base / "atmosphere-mapping.md")
+                _Path(mapping_path).write_text(
+                    md_content, encoding="utf-8",
+                )
+                snapshot_recorder.set_mapping_path(mapping_path)
+            except Exception as e:
+                logger.warning("写入 atmosphere-mapping.md 失败: %s", e)
+
+        # Step 7: 组装返回——内联完整映射
+        _session_mapping_generated = True
+        duration_ms = (time.monotonic() - t0) * 1000
+        result_text = (
+            "氛围组件扫描完成：\n"
+            + "\n".join(scan_lines)
+            + f"\n\n映射已生成：{total_props} 个氛围相关属性"
+            + (f" → {mapping_path}" if mapping_path else "")
+            + "\n\n---\n\n"
+            + md_content
+        )
+
+        log_local_call(ctx, "build_atmosphere_mapping", arguments, result_text, t0)
+        return CallToolResult(content=[TextContent(type="text", text=result_text)])
+
+
+    # ---- HarnessTool 注册表 (Issue 018) ----
+
+    _harness_tools: list[HarnessTool] = [
+        # Skill 工具
+        HarnessTool(
+            name="activate_skill",
+            description="激活一个 Skill（按名称或描述片段匹配）。激活后可用工具限制为 Skill 白名单。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name_or_desc": {"type": "string", "description": "Skill 名称或描述片段"}
+                },
+                "required": ["name_or_desc"],
+            },
+            handler=handle_activate_skill,
+        ),
+        HarnessTool(
+            name="save_skill",
+            description="保存一个新的 Skill YAML 到 ~/.ue-harness/skills/。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill 名称"},
+                    "yaml_content": {"type": "string", "description": "完整的 Skill YAML 内容"},
+                },
+                "required": ["name", "yaml_content"],
+            },
+            handler=handle_save_skill,
+        ),
+        HarnessTool(
+            name="get_context",
+            description="获取 Harness 组装的完整系统上下文（UE 状态快照 + 活跃 Skill + 可用工具）。",
+            input_schema={"type": "object", "properties": {}},
+            handler=handle_get_context,
+        ),
+        HarnessTool(
+            name="deactivate_skill",
+            description="退出当前活跃的 Skill 模式，回到自由探索模式。",
+            input_schema={"type": "object", "properties": {}},
+            handler=handle_deactivate_skill,
+        ),
+        # Vision 工具
+        HarnessTool(
+            name="vision_screenshot",
+            description=(
+                "获取 UE 编辑器截图，追加到当前 Vision Session，可选附带针对性提问。"
+                "如无活跃 Session 则自动创建。系统会自动注入场景上下文（dirty actors、"
+                "最近操作记录）。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["viewport", "editor", "asset"],
+                        "description": "截图模式。viewport=仅视口画面；editor=合成编辑器窗口；asset=资产缩略图",
+                        "default": "viewport",
+                    },
+                    "asset_path": {"type": "string", "description": "仅 mode=asset 时有效"},
+                    "hide_ui": {"type": "boolean", "description": "隐藏编辑器 UI 覆盖层", "default": False},
+                    "question": {
+                        "type": "string",
+                        "description": "可选。针对本次截图的首次提问。如 '所有立方体对齐了吗？'。Vision 会自动获得场景上下文。"
+                    },
+                },
+            },
+            handler=handle_vision_screenshot,
+        ),
+        HarnessTool(
+            name="vision_ask",
+            description=(
+                "在当前 Vision Session 中追问（不截新图）。复用 Session 内所有截图和对话历史。"
+                "系统自动附带最新场景上下文。必须先调 vision_screenshot 创建 Session。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "追问的具体问题。Vision 可引用之前的对话上下文。"
+                    },
+                },
+                "required": ["question"],
+            },
+            handler=handle_vision_ask,
+        ),
+        HarnessTool(
+            name="vision_tell",
+            description=(
+                "向当前 Vision Session 注入 LLM 的意图或预期（系统无法自动推断的信息）。"
+                "不触发 API 调用。如需注入系统已知的数据（Actor 状态、修改记录），系统会自动完成。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "info": {
+                        "type": "string",
+                        "description": "任务级意图或预期。如：'目标是傍晚暖色光照，色温应为 4000K'。"
+                    },
+                },
+                "required": ["info"],
+            },
+            handler=handle_vision_tell,
+        ),
+        HarnessTool(
+            name="vision_reset",
+            description="关闭当前 Vision Session（归档到日志），开启新 Session。在新任务开始或场景发生根本变化时调用。",
+            input_schema={"type": "object", "properties": {}},
+            handler=handle_vision_reset,
+        ),
+        HarnessTool(
+            name="vision_status",
+            description="查看当前 Vision Session 摘要：时长、截图数、提问数、上次结论。",
+            input_schema={"type": "object", "properties": {}},
+            handler=handle_vision_status,
+        ),
+        # 参考图工具
+        HarnessTool(
+            name="match_reference",
+            description=(
+                "加载参考图，与当前 UE 视口做 9 维度整体对比（亮度/对比度/色温/"
+                "色调偏移/饱和度/大气密度/阴影方向/天空表现/视角方向）。返回结构化方向性差异"
+                "+ 5 项量化指标。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "参考图文件路径（PNG/JPEG）",
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=_handle_match_reference,
+        ),
+        HarnessTool(
+            name="build_atmosphere_mapping",
+            description=(
+                "扫描场景中 5 类氛围组件（DirectionalLight/SkyAtmosphere/"
+                "ExponentialHeightFog/VolumetricCloud/PostProcessVolume），"
+                "通过 MiMo 筛选氛围相关属性并按 8 维度分类，生成维度→属性映射。"
+                "每会话调用一次即可。"
+            ),
+            input_schema={"type": "object", "properties": {}},
+            handler=_handle_build_atmosphere_mapping,
+        ),
+    ]
+
     async def _rebuild_tool_reference() -> list[dict]:
         """获取当前过滤后的工具列表（首次查 UE，后续复用缓存）。"""
         nonlocal _cached_raw_tools
@@ -191,156 +851,23 @@ def build_server(
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        """返回 Context Assembly 过滤后的工具列表。
-
-        004 自由探索模式：仅暴露 allowlist 匹配的工具 + 逃生通道
-        005 Skill 模式：额外包含 Skill 的 tools_allowlist
-        """
         filtered = await _rebuild_tool_reference()
-
         result: list[Tool] = []
         for t in filtered:
-            result.append(
-                Tool(
-                    name=t.get("name", ""),
-                    description=t.get("description", "") or f"UE 工具: {t.get('name', '')}",
-                    inputSchema=t.get("inputSchema", {"type": "object"}),
-                )
-            )
+            result.append(Tool(
+                name=t.get("name", ""),
+                description=t.get("description", "") or f"UE 工具: {t.get('name', '')}",
+                inputSchema=t.get("inputSchema", {"type": "object"}),
+            ))
 
-        # 追加 Harness 自有工具
-        result.append(Tool(
-            name="activate_skill",
-            description="激活一个 Skill（按名称或描述片段匹配）。激活后可用工具限制为 Skill 白名单。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name_or_desc": {"type": "string", "description": "Skill 名称或描述片段"}
-                },
-                "required": ["name_or_desc"],
-            },
-        ))
-        result.append(Tool(
-            name="save_skill",
-            description="保存一个新的 Skill YAML 到 ~/.ue-harness/skills/。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Skill 名称"},
-                    "yaml_content": {"type": "string", "description": "完整的 Skill YAML 内容"},
-                },
-                "required": ["name", "yaml_content"],
-            },
-        ))
-        result.append(Tool(
-            name="get_context",
-            description="获取 Harness 组装的完整系统上下文（UE 状态快照 + 活跃 Skill + 可用工具）。",
-            inputSchema={"type": "object", "properties": {}},
-        ))
-        result.append(Tool(
-            name="deactivate_skill",
-            description="退出当前活跃的 Skill 模式，回到自由探索模式。",
-            inputSchema={"type": "object", "properties": {}},
-        ))
-        # Issue 015: Vision Session 工具
-        result.append(Tool(
-            name="vision_screenshot",
-            description=(
-                "获取 UE 编辑器截图，追加到当前 Vision Session，可选附带针对性提问。"
-                "如无活跃 Session 则自动创建。系统会自动注入场景上下文（dirty actors、"
-                "最近操作记录）。"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "mode": {
-                        "type": "string",
-                        "enum": ["viewport", "editor", "asset"],
-                        "description": "截图模式。viewport=仅视口画面；editor=合成编辑器窗口；asset=资产缩略图",
-                        "default": "viewport",
-                    },
-                    "asset_path": {"type": "string", "description": "仅 mode=asset 时有效"},
-                    "hide_ui": {"type": "boolean", "description": "隐藏编辑器 UI 覆盖层", "default": False},
-                    "question": {
-                        "type": "string",
-                        "description": "可选。针对本次截图的首次提问。如 '所有立方体对齐了吗？'。Vision 会自动获得场景上下文。"
-                    },
-                },
-            },
-        ))
-        result.append(Tool(
-            name="vision_ask",
-            description=(
-                "在当前 Vision Session 中追问（不截新图）。复用 Session 内所有截图和对话历史。"
-                "系统自动附带最新场景上下文。必须先调 vision_screenshot 创建 Session。"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "追问的具体问题。Vision 可引用之前的对话上下文。"
-                    },
-                },
-                "required": ["question"],
-            },
-        ))
-        result.append(Tool(
-            name="vision_tell",
-            description=(
-                "向当前 Vision Session 注入 LLM 的意图或预期（系统无法自动推断的信息）。"
-                "不触发 API 调用。如需注入系统已知的数据（Actor 状态、修改记录），系统会自动完成。"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "info": {
-                        "type": "string",
-                        "description": "任务级意图或预期。如：'目标是傍晚暖色光照，色温应为 4000K'。"
-                    },
-                },
-                "required": ["info"],
-            },
-        ))
-        result.append(Tool(
-            name="vision_reset",
-            description="关闭当前 Vision Session（归档到日志），开启新 Session。在新任务开始或场景发生根本变化时调用。",
-            inputSchema={"type": "object", "properties": {}},
-        ))
-        result.append(Tool(
-            name="vision_status",
-            description="查看当前 Vision Session 摘要：时长、截图数、提问数、上次结论。",
-            inputSchema={"type": "object", "properties": {}},
-        ))
-        # ---- 参考图工具 (Plan 0708) ----
-        result.append(Tool(
-            name="match_reference",
-            description=(
-                "加载参考图，与当前 UE 视口做 9 维度整体对比（亮度/对比度/色温/"
-                "色调偏移/饱和度/大气密度/阴影方向/天空表现/视角方向）。返回结构化方向性差异"
-                "+ 5 项量化指标。"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "参考图文件路径（PNG/JPEG）",
-                    },
-                },
-                "required": ["path"],
-            },
-        ))
-        result.append(Tool(
-            name="build_atmosphere_mapping",
-            description=(
-                "扫描场景中 5 类氛围组件（DirectionalLight/SkyAtmosphere/"
-                "ExponentialHeightFog/VolumetricCloud/PostProcessVolume），"
-                "通过 MiMo 筛选氛围相关属性并按 8 维度分类，生成维度→属性映射。"
-                "每会话调用一次即可。"
-            ),
-            inputSchema={"type": "object", "properties": {}},
-        ))
+        # 从注册表收集 Harness 自有工具 spec
+        for ht in _harness_tools:
+            spec = ht.to_mcp_tool()
+            result.append(Tool(
+                name=spec["name"],
+                description=spec["description"],
+                inputSchema=spec["inputSchema"],
+            ))
 
         logger.info("LLM tools/list: 返回 %d 个工具（全量 %d 个，过滤后 + Harness 自有）",
                      len(result), len(_cached_raw_tools))
@@ -350,805 +877,14 @@ def build_server(
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
-        """路由工具调用：Harness 自有工具本地处理，UE 工具透传。
-
-        Harness 自有工具:
-          - activate_skill: 激活 Skill → 设置 skill_ref[0]
-          - save_skill:     保存 Skill YAML → skill_registry.save_skill()
-          - vision_* :      Issue 015 Vision Session 工具
-        """
-
         nonlocal _session_reference, _session_mapping_generated, _is_first_load, _stop_limit
 
-        # 辅助：为 Harness 自有工具记录日志到 JSONL
-        # 未经 UE 透传路径的工具需手动触发 ToolCallLogger
-        async def _log_harness_call(tool_name, tool_args, result_text, duration_ms, error=None):
-            event = ToolCallCompleted(
-                name=tool_name, args=tool_args,
-                raw_result={"content": [{"type": "text", "text": result_text}]},
-                parsed_text=result_text,
-                error=error, duration_ms=duration_ms,
-            )
-            for ic in interceptors:
-                if type(ic).__name__ == "ToolCallLogger":
-                    try:
-                        await ic.post_call(event)
-                    except Exception as e:
-                        logger.error("日志写入失败 %s: %s", tool_name, e)
-                    break
-
-        from harness.verification.vision_agent import VisionSubAgent
-
-        # ---- Harness 自有工具 ----
-
-        if name == "activate_skill":
-            query = arguments.get("name_or_desc", "")
-
-            # 空查询 → 重新扫描目录（感知外部 YAML 变更）
-            if not query.strip():
-                count = skill_registry.reload()
-                return CallToolResult(content=[TextContent(
-                    type="text",
-                    text=f"已重新扫描 Skill 目录，发现 {count} 个 Skill。"
-                         f"可用: {_list_skill_names()}",
-                )])
-
-            matches = skill_registry.match_skill(query)
-
-            if not matches:
-                return CallToolResult(content=[TextContent(
-                    type="text",
-                    text=f"未找到匹配 '{query}' 的 Skill。可用 Skill: {_list_skill_names()}",
-                )])
-
-            if len(matches) == 1:
-                skill = matches[0]
-                yaml_text = skill_registry.load_skill_yaml(skill.name)
-                if yaml_text:
-                    if skill_ref is not None:
-                        skill_ref[0] = _parse_skill_yaml_to_dict(yaml_text)
-                    if snapshot_recorder is not None:
-                        snapshot_recorder.on_skill_activated(skill.name, yaml_text)
-                    logger.info("Skill 已激活: %s", skill.name)
-                    return CallToolResult(content=[TextContent(
-                        type="text",
-                        text=f"Skill '{skill.name}' 已激活。{skill.description}\n"
-                             f"步骤 ({skill.steps_count} 步)、"
-                             f"工具白名单 ({len(skill.tools_allowlist)} 个): "
-                             f"{', '.join(skill.tools_allowlist[:5])}"
-                             f"{'...' if len(skill.tools_allowlist) > 5 else ''}",
-                    )])
-
-            # 多匹配：列出备选
-            lines = [f"找到 {len(matches)} 个匹配 '{query}' 的 Skill，请选择一个："]
-            for m in matches:
-                lines.append(f"  - {m.name}: {m.description or '(无描述)'}")
-            return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))])
-
-        if name == "save_skill":
-            skill_name = arguments.get("name", "")
-            yaml_content = arguments.get("yaml_content", "")
-
-            if not skill_name or not yaml_content:
-                return CallToolResult(
-                    content=[TextContent(type="text", text="错误: name 和 yaml_content 均为必填")],
-                    isError=True,
-                )
-
-            # 重复名检查
-            existing = skill_registry.get_skill(skill_name)
-            if existing and not arguments.get("overwrite", False):
-                return CallToolResult(content=[TextContent(
-                    type="text",
-                    text=f"Skill '{skill_name}' 已存在。传 overwrite=true 覆盖，或先调 delete 再 save。",
-                )])
-
-            try:
-                info = skill_registry.save_skill(skill_name, yaml_content)
-                return CallToolResult(content=[TextContent(
-                    type="text",
-                    text=f"Skill '{info.name}' 已保存。{info.description}\n"
-                         f"步骤: {info.steps_count} 步, "
-                         f"工具: {', '.join(info.tools_allowlist)}",
-                )])
-            except ValueError as e:
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"保存失败: {e}")],
-                    isError=True,
-                )
-
-        if name == "get_context":
-            prompt = assemble_system_prompt(context_providers, world_state, skill_ref[0] if skill_ref else None)
-            return CallToolResult(content=[TextContent(type="text", text=prompt)])
-
-        if name == "deactivate_skill":
-            was_active = skill_ref is not None and skill_ref[0] is not None
-            if skill_ref is not None:
-                skill_ref[0] = None
-            if snapshot_recorder is not None:
-                snapshot_recorder.on_skill_deactivated()
-            if was_active:
-                return CallToolResult(content=[TextContent(
-                    type="text", text="已退出 Skill 模式，回到自由探索模式。",
-                )])
-            return CallToolResult(content=[TextContent(
-                type="text", text="当前未激活任何 Skill，已在自由探索模式。",
-            )])
-
-        # ---- Issue 015: Vision Session 工具 ----
-
-        if name == "vision_ask":
-            t0 = time.monotonic()
-            if vision_session_manager is None:
-                return CallToolResult(content=[TextContent(
-                    type="text", text="Vision Session Manager 未初始化。",
-                )], isError=True)
-            question = arguments.get("question", "")
-            if not question.strip():
-                return CallToolResult(content=[TextContent(
-                    type="text", text="question 参数不能为空。",
-                )], isError=True)
-            try:
-                verdict = await vision_session_manager.ask(question)
-            except ValueError as e:
-                duration_ms = (time.monotonic() - t0) * 1000
-                err_text = str(e)
-                await _log_harness_call(name, arguments, err_text, duration_ms, error=ValueError(err_text))
-                return CallToolResult(content=[TextContent(
-                    type="text", text=err_text,
-                )], isError=True)
-            duration_ms = (time.monotonic() - t0) * 1000
-            warning = vision_session_manager.check_warning()
-            result_text = verdict.reason
-            if warning:
-                result_text = warning + "\n\n" + result_text
-            await _log_harness_call(name, arguments, result_text, duration_ms)
-            return CallToolResult(content=[TextContent(type="text", text=result_text)])
-
-        if name == "vision_tell":
-            t0 = time.monotonic()
-            if vision_session_manager is None:
-                return CallToolResult(content=[TextContent(
-                    type="text", text="Vision Session Manager 未初始化。",
-                )], isError=True)
-            info = arguments.get("info", "")
-            if not info.strip():
-                return CallToolResult(content=[TextContent(
-                    type="text", text="info 参数不能为空。",
-                )], isError=True)
-            vision_session_manager.tell(info)
-            duration_ms = (time.monotonic() - t0) * 1000
-            result_text = f"已注入上下文到 Vision Session（{len(info)} 字符）。"
-            await _log_harness_call(name, arguments, result_text, duration_ms)
-            return CallToolResult(content=[TextContent(type="text", text=result_text)])
-
-        if name == "vision_reset":
-            t0 = time.monotonic()
-            if vision_session_manager is None:
-                return CallToolResult(content=[TextContent(
-                    type="text", text="Vision Session Manager 未初始化。",
-                )], isError=True)
-            old_session = vision_session_manager.get_active()
-            vision_session_manager.reset()
-            duration_ms = (time.monotonic() - t0) * 1000
-            if old_session:
-                result_text = f"Vision Session {old_session.id} 已关闭并归档。新 Session 已创建。"
-            else:
-                result_text = "新 Vision Session 已创建。"
-            await _log_harness_call(name, arguments, result_text, duration_ms)
-            return CallToolResult(content=[TextContent(type="text", text=result_text)])
-
-        if name == "vision_status":
-            t0 = time.monotonic()
-            if vision_session_manager is None:
-                return CallToolResult(content=[TextContent(
-                    type="text", text="Vision Session Manager 未初始化。",
-                )], isError=True)
-            result_text = vision_session_manager.status_text()
-            duration_ms = (time.monotonic() - t0) * 1000
-            await _log_harness_call(name, arguments, result_text, duration_ms)
-            return CallToolResult(content=[TextContent(
-                type="text", text=result_text,
-            )])
-
-        # ---- 参考图工具 (Plan 0708) ----
-
-        if name == "match_reference":
-            t0 = time.monotonic()
-            ref_path_str = arguments.get("path", "")
-
-            # Phase 3: 硬终止检查（倒计时归零 或 总轮次兜底）
-            _match_count = _session_reference.get("_match_count", 0)
-            _countdown = _session_reference.get("_countdown_remaining")
-            _max_allowed = _session_reference.get("_max_allowed_rounds", 10)
-
-            should_stop = False
-            stop_reason = ""
-
-            if _countdown is not None and _countdown < 0:
-                should_stop = True
-                stop_reason = (
-                    "倒计时已归零"
-                    "（直方图≥0.70 达成后已用尽 3 次调整机会）"
-                )
-            elif _countdown is None and _match_count >= _max_allowed:
-                should_stop = True
-                stop_reason = f"已达到最大轮次限制（{_max_allowed} 轮）"
-
-            if should_stop and _stop_limit is not None:
-                best_path = _session_reference.get("best_snapshot_path")
-                summary = _stop_limit.build_summary(
-                    _session_reference, best_path, stop_reason,
-                )
-                duration_ms = (time.monotonic() - t0) * 1000
-                await _log_harness_call(name, arguments, summary, duration_ms)
-                return CallToolResult(
-                    content=[TextContent(type="text", text=summary)],
-                    isError=True,
-                )
-
-            # 1. 加载参考图
-            try:
-                from PIL import Image as PILImage
-                from pathlib import Path as _Path
-                ref_path = _Path(ref_path_str).expanduser().resolve()
-                if not ref_path.exists():
-                    return CallToolResult(content=[TextContent(
-                        type="text", text=f"参考图不存在: {ref_path}",
-                    )], isError=True)
-                ref_img = PILImage.open(ref_path).convert("RGB")
-            except Exception as e:
-                return CallToolResult(content=[TextContent(
-                    type="text", text=f"加载参考图失败: {e}",
-                )], isError=True)
-
-            # 2. 截当前视口
-            try:
-                from harness.verification.capturer import capture as capturer_capture
-                max_w, max_h = config.vision_max_size
-                screenshot = await capturer_capture(
-                    ue_client, max_w, max_h, mode="viewport",
-                )
-                cur_b64 = screenshot.data_b64
-            except Exception as e:
-                return CallToolResult(content=[TextContent(
-                    type="text", text=f"截图失败: {e}",
-                )], isError=True)
-
-            # 3. 参考图 → base64
-            import io as _io
-            buf = _io.BytesIO()
-            ref_img.save(buf, format="PNG")
-            ref_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-
-            _is_first_load = _session_reference.get("_loaded") is None
-            _prev_path = _session_reference.get("path", "")
-            _is_new_reference = (str(ref_path) != _prev_path)
-
-            if _is_new_reference and not _is_first_load:
-                # 换了参考图 → 重置所有累积状态
-                _session_reference = {"_loaded": True}
-                _is_first_load = True
-
-            _session_reference.update({"b64": ref_b64, "path": str(ref_path), "_loaded": True})
-
-            # 递增 match_reference 调用计数（Phase 1）
-            _match_count = _session_reference.get("_match_count", 0) + 1
-            _session_reference["_match_count"] = _match_count
-
-            # 4. 量化指标
-            from harness.verification.metrics import compute_match_metrics
-            try:
-                cur_img = _b64_to_pil(cur_b64)
-            except Exception:
-                cur_img = None
-
-            metrics_error: str | None = None
-            metrics_result = None
-            if cur_img is not None:
-                try:
-                    metrics_result = compute_match_metrics(ref_img, cur_img)
-                    _session_reference["metrics"] = metrics_result
-                except Exception as e:
-                    logger.warning("量化指标计算失败（非致命）: %s", e)
-                    metrics_error = str(e)
-            else:
-                metrics_error = "当前截图无法解码为 PIL Image"
-
-            # 4b. 趋势对比（vs 上一次 match_reference 调用）
-            prev_metrics = _session_reference.get("prev_metrics")
-            trend_lines: list[str] = []
-            if prev_metrics is not None and metrics_result is not None:
-                trend_lines = _build_trend_summary(prev_metrics, metrics_result)
-            # 保存本次结果供下次对比
-            _session_reference["prev_metrics"] = metrics_result
-
-            # 5. MiMo 9 维度双图对比
-            question = (
-                "请从以下 9 个维度比较当前截图与参考图的差异。"
-                "每个维度只输出方向性判定，不需要描述绝对值：\n\n"
-                "亮度 (Brightness):       darker / similar / brighter\n"
-                "对比度 (Contrast):       lower / similar / higher\n"
-                "色温 (Color Temperature): cooler / similar / warmer\n"
-                "色调偏移 (Color Cast):    none / 偏X色\n"
-                "饱和度 (Saturation):      less_saturated / similar / more_saturated\n"
-                "大气密度 (Haze):          clearer / similar / hazier\n"
-                "阴影方向 (Shadow Direction): 方向描述 + 是否一致\n"
-                "天空表现 (Sky):           颜色/云量/渐变的差异方向\n"
-                "视角方向 (Viewpoint Direction): looking_more_up / similar / looking_more_down\n\n"
-                "注意：视角方向只比较相机俯仰角（向上看 vs 向下看），"
-                "不考虑相机距离和目标对象。"
-                "如果两张图拍摄的是完全不同的场景/对象，填 'different_scene'。\n\n"
-                "每个判定配一句话佐证（你看到什么让你这样判断）。"
-            )
-
-            agent = VisionSubAgent(config)
-            try:
-                verdict = await agent.compare_with_reference(ref_b64, cur_b64, question)
-            except Exception as e:
-                duration_ms = (time.monotonic() - t0) * 1000
-                err_text = f"match_reference Vision 调用失败: {e}"
-                await _log_harness_call(name, arguments, err_text, duration_ms, error=e)
-                return CallToolResult(content=[TextContent(
-                    type="text", text=err_text,
-                )], isError=True)
-
-            # 6. 组装返回文本（正文先行，header 在倒计时激活后 prepend）
-            duration_ms = (time.monotonic() - t0) * 1000
-            ref_w, ref_h = ref_img.size
-
-            body_lines: list[str] = []
-            if trend_lines:
-                body_lines.extend(trend_lines)
-            body_lines.append("")
-
-            body_lines.append("MiMo 9 维度差异：")
-            body_lines.append(verdict.answer)
-            _badges = {"high": "🟢", "medium": "🟡", "low": "🔴"}
-            body_lines.append(
-                f"置信度: {_badges.get(verdict.confidence, '🟡')} "
-                f"{verdict.confidence}"
-            )
-            if verdict.observations:
-                body_lines.append("")
-                body_lines.append("分项观察：")
-                for obs in verdict.observations:
-                    what = obs.get("what", "")
-                    finding = obs.get("finding", "")
-                    conf = obs.get("confidence", "medium")
-                    ob = _badges.get(conf, "~")
-                    body_lines.append(f"  {ob} {what}: {finding}")
-
-            if metrics_result:
-                m = metrics_result
-
-                hist = m["histogram_correlation"]
-                rb_cur = m["color_temperature"]["cur_r_b_ratio"]
-
-                # Phase 1: 倒计时激活（hist≥0.70 首次达成时）
-                _countdown = _session_reference.get("_countdown_remaining")
-                if _countdown is None and hist >= 0.70:
-                    _session_reference["_countdown_remaining"] = 3
-                    _session_reference["_countdown_start_round"] = _match_count
-                    _session_reference["_max_allowed_rounds"] = _match_count + 3
-
-                # 倒计时递减
-                if _session_reference.get("_countdown_remaining") is not None:
-                    _session_reference["_countdown_remaining"] -= 1
-
-                body_lines.append("")
-                body_lines.append("量化指标（全图统计，不受视点移动影响）：")
-                body_lines.append(f"{'':>12} {'参考图':>8} {'当前':>8} {'差异':>10}")
-                body_lines.append(
-                    f"{'亮度':>12} {m['luminance']['ref']:>8.1f} "
-                    f"{m['luminance']['cur']:>8.1f} {m['luminance']['delta_pct']:>+9.1f}%"
-                )
-                body_lines.append(
-                    f"{'对比度':>12} {m['contrast']['ref']:>8.1f} "
-                    f"{m['contrast']['cur']:>8.1f} {m['contrast']['delta_pct']:>+9.1f}%"
-                )
-                ct = m["color_temperature"]
-                body_lines.append(
-                    f"{'色温':>12} {'R/B=' + str(ct['ref_r_b_ratio']):>8} "
-                    f"{'R/B=' + str(ct['cur_r_b_ratio']):>8}"
-                )
-                body_lines.append(
-                    f"{'饱和度':>12} {m['saturation']['ref']:>8.1f} "
-                    f"{m['saturation']['cur']:>8.1f} {m['saturation']['delta_pct']:>+9.1f}%"
-                )
-                body_lines.append(
-                    f"{'直方图相似度':>12} {'':>8} {'':>8} "
-                    f"{m['histogram_correlation']:>10.2f} (0→完全不同, 1→完全一致)"
-                )
-
-                # Phase 1c: 最佳点追踪 + 连续下降检测
-                best = _session_reference.get("best_metrics")
-                if best is None or hist > best.get("histogram_correlation", 0):
-                    _session_reference["best_metrics"] = {
-                        "histogram_correlation": hist,
-                        "round": _session_reference.get("_match_count", 0),
-                        "rb_ratio": rb_cur,
-                    }
-                    body_lines.append("")
-                    body_lines.append(
-                        f"🏆 新最佳记录：直方图相似度 {hist:.2f}"
-                        f"（第 {_session_reference['best_metrics']['round']} 轮）"
-                    )
-
-                    # Phase 2: 最佳状态快照（仅首次跨过 0.70 时保存一次）
-                    if hist >= 0.70 and not _session_reference.get("_snapshot_saved"):
-                        _session_reference["_snapshot_saved"] = True
-                        snapshot_path = await _ensure_best_snapshot_path(
-                            ue_client, _session_reference,
-                        )
-                        try:
-                            await ue_client.call_tool(
-                                "LevelPersistenceToolset.LevelPersistenceToolset.SaveLevelAs",
-                                {"TargetPath": snapshot_path},
-                            )
-                            _session_reference["best_snapshot_path"] = snapshot_path
-                            body_lines.append("")
-                            body_lines.append(
-                                f"💾 快照已保存至 {snapshot_path}，编辑器仍在原关卡。"
-                                f"仅当需要回退错误操作时才调 LoadLevel，请勿无故加载快照。"
-                            )
-                        except Exception as e:
-                            logger.warning("SaveLevelAs 失败: %s", e)
-
-                elif best is not None:
-                    best_hist = best.get("histogram_correlation", 0)
-                    best_round = best.get("round", "?")
-                    body_lines.append("")
-                    body_lines.append(
-                        f"⚠ 当前直方图相似度 {hist:.2f} 低于最佳记录 "
-                        f"{best_hist:.2f}（第 {best_round} 轮）。"
-                        f"可能已越过最佳点，考虑回退到上一轮参数。"
-                    )
-
-                # 连续下降检测
-                prev_hist = _session_reference.get("_prev_hist")
-                if prev_hist is not None and hist < prev_hist:
-                    _decline = _session_reference.get("_decline_count", 0) + 1
-                    _session_reference["_decline_count"] = _decline
-                    if _decline >= 2:
-                        lines.append(
-                            "🔴 直方图相似度连续 2 轮下降，"
-                            "建议回退到上一轮参数并停止该方向调整。"
-                        )
-                else:
-                    _session_reference["_decline_count"] = 0
-                _session_reference["_prev_hist"] = hist
-            elif metrics_error:
-                body_lines.append(f"\n⚠ 量化指标计算失败: {metrics_error}")
-                body_lines.append("MiMo 分析仍然有效。")
-
-            body_lines.append("")
-            body_lines.append("---")
-            body_lines.append("")
-            if _is_first_load:
-                body_lines.append(
-                    "在存在参考图的任务里，每轮迭代请使用 "
-                    f"match_reference(\"{ref_path_str}\") 获取对比反馈，"
-                    "不要用 vision_ask 做氛围对比。"
-                )
-                body_lines.append("")
-            body_lines.append(
-                "match_reference 每次返回量化指标（R/B、亮度、饱和度）——"
-                "这是确定性像素计算，不受 VLM 主观判断影响，是最可靠的调整指南针。"
-            )
-            body_lines.append(
-                "⚠ MiMo 分析与量化指标方向一致 → 高置信；"
-                "不一致 → 以量化指标为准。"
-            )
-
-            # 组装最终输出：header（含倒计时状态）+ body
-            _max_allowed = _session_reference.get("_max_allowed_rounds", 10)
-            _countdown = _session_reference.get("_countdown_remaining")
-
-            if _countdown is not None and _countdown > 0:
-                header_lines = [
-                    f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
-                    f"第 {_match_count} 轮（最多 {_max_allowed} 轮，"
-                    f"⏳ 直方图已达 0.70+，剩余 {_countdown} 次调整机会）",
-                ]
-            elif _countdown is not None and _countdown == 0:
-                header_lines = [
-                    f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
-                    f"第 {_match_count} 轮（最多 {_max_allowed} 轮，"
-                    f"⏳ 本轮为最后一次调整机会）",
-                ]
-            else:
-                header_lines = [
-                    f"参考图：{ref_path.name} ({ref_w}×{ref_h})",
-                    f"第 {_match_count} 轮（最多 {_max_allowed} 轮）",
-                ]
-
-            lines = header_lines + body_lines
-
-            result_text = "\n".join(lines)
-            await _log_harness_call(name, arguments, result_text, duration_ms)
-            return CallToolResult(content=[TextContent(type="text", text=result_text)])
-
-        if name == "build_atmosphere_mapping":
-            t0 = time.monotonic()
-
-            # 5 类氛围组件的 UE 类引用
-            # 使用 actor_type (class refPath) 而非 glob:
-            # UE find_actors 的 glob 匹配对长模式不可靠,
-            # "*DirectionalLight*" 返回空但 "*Light*" 能找到,
-            # class 引用是精确匹配, 无此问题.
-            # 详见 docs/handoff/find_actors_glob_issue.md
-            ATMOSPHERE_TYPES: dict[str, str] = {
-                "DirectionalLight": "/Script/Engine.DirectionalLight",
-                "SkyAtmosphere": "/Script/Engine.SkyAtmosphere",
-                "ExponentialHeightFog": "/Script/Engine.ExponentialHeightFog",
-                "VolumetricCloud": "/Script/Engine.VolumetricCloud",
-                "PostProcessVolume": "/Script/Engine.PostProcessVolume",
-            }
-
-            # Step 1: 扫描 5 类组件
-            scan_lines: list[str] = []
-            actors_found: dict[str, list[str]] = {}
-
-            for actor_type, class_path in ATMOSPHERE_TYPES.items():
-                try:
-                    result_text = await ue_client.call_tool(
-                        "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
-                        {"tag": "", "actor_type": {"refPath": class_path}},
-                    )
-                    parsed = mcp_parse_result(result_text)
-                    actor_list = state_parse_actor_names(parsed)
-                    actors_found[actor_type] = actor_list
-                    count = len(actor_list)
-                    if count == 1:
-                        scan_lines.append(f"  {actor_type}: 1 个 ({actor_list[0]})")
-                    elif count > 1:
-                        scan_lines.append(
-                            f"  {actor_type}: {count} 个 "
-                            f"({', '.join(actor_list[:3])}"
-                            f"{'...' if count > 3 else ''}) ⚠ 多实例，需确认"
-                        )
-                    else:
-                        scan_lines.append(
-                            f"  {actor_type}: 未找到"
-                        )
-                except Exception as e:
-                    scan_lines.append(f"  {actor_type}: 查询失败 ({e})")
-
-            # 缺失组件汇总提示（一次性，不给 LLM 逐个下达操作指令的机会）
-            missing_types = [
-                at for at, names in actors_found.items() if not names
-            ]
-            if missing_types:
-                scan_lines.append("")
-                scan_lines.append(
-                    f"提示: {len(missing_types)} 类组件未找到"
-                    f"（{', '.join(missing_types)}）。"
-                    f"如需创建，使用 add_to_scene_from_class。"
-                )
-
-            # Step 2: 构建属性索引（含 component 子对象递归 + refPath 溯源）
-            property_index: list[dict] = []
-            next_idx = 1
-
-            for actor_type, actor_names in actors_found.items():
-                if not actor_names:
-                    continue
-                for actor_name in actor_names[:1]:
-                    try:
-                        # 2a. 获取 actor 顶层属性名
-                        props_result = await ue_client.call_tool(
-                            "toolset_registry.toolsets.core.object.ObjectTools.list_properties",
-                            {"instance": {"refPath": actor_name}},
-                        )
-                        props_parsed = mcp_parse_result(props_result)
-                        props_text = mcp_extract_text(
-                            props_parsed, props_result,
-                        )
-                        # 解包可能的 returnValue 包装
-                        props_text = mcp_unwrap_return_text(props_text or "")
-                        actor_prop_names = _extract_property_names(props_text)
-
-                        # 2b. 解析 component 引用，递归获取 component 级属性
-                        direct_props, component_refs, comp_prop_names = \
-                            await _resolve_component_properties(
-                                ue_client, actor_name, actor_prop_names,
-                            )
-
-                        # 2c. 构建索引条目（component 指针字段被其子属性替换）
-                        entries, next_idx = _build_property_index(
-                            actor_type=actor_type,
-                            actor_name=actor_name,
-                            actor_prop_names=actor_prop_names,
-                            component_refs=component_refs,
-                            comp_prop_names=comp_prop_names,
-                            start_index=next_idx,
-                        )
-                        property_index.extend(entries)
-                    except Exception as e:
-                        logger.warning(
-                            "获取 %s 属性列表失败: %s", actor_name, e,
-                        )
-
-            # Step 3: 组装 MiMo 分类 prompt（索引模式——MiMo 只输出整数）
-            prompt = _build_mimo_prompt(property_index)
-
-            # Step 4: MiMo 分类 + 索引解析
-            agent = VisionSubAgent(config)
-            try:
-                mimo_output = await agent.classify(prompt)
-                mapping = _resolve_mimo_indices(mimo_output, property_index)
-            except ValueError as e:
-                duration_ms = (time.monotonic() - t0) * 1000
-                err_text = f"MiMo 分类失败: {e}"
-                # 降级：返回原始属性索引列表（含 refPath 标注）
-                fallback_lines = [
-                    "⚠ MiMo 分类失败，以下是原始属性索引列表。",
-                    "请 LLM 自行筛选氛围相关属性并调整。",
-                    "",
-                    "| 索引 | 组件 | 属性位置 (refPath) | 属性 |",
-                    "|------|------|-------------------|------|",
-                ]
-                for entry in property_index:
-                    short_ref = (
-                        entry["refPath"].split(":")[-1]
-                        if ":" in entry["refPath"]
-                        else entry["refPath"]
-                    )
-                    fallback_lines.append(
-                        f"| {entry['index']} | {entry['actor_type']} "
-                        f"| `{short_ref}` | {entry['property']} |"
-                    )
-                await _log_harness_call(
-                    name, arguments,
-                    f"MiMo 失败，返回原始属性索引列表 ({err_text})",
-                    duration_ms, error=e,
-                )
-                return CallToolResult(content=[TextContent(
-                    type="text", text="\n".join(fallback_lines),
-                )])
-
-            # Step 5: JSON → Markdown 表格
-            md_content = _render_mapping_markdown(mapping)
-            total_props = sum(
-                len(props) for props in mapping.values()
-                if isinstance(props, list)
-            )
-
-            # Step 6: 写入文件（fallback 路径）
-            mapping_path = ""
-            if snapshot_recorder is not None:
-                try:
-                    from pathlib import Path as _Path
-                    log_base = config.log_dir
-                    session_name = getattr(
-                        snapshot_recorder, "_snapshot_dir", None,
-                    )
-                    if session_name is not None:
-                        session_name = _Path(getattr(
-                            session_name, "name", "",  # noqa — defensive
-                        ))
-                        # snapshot_recorder._snapshot_dir is a Path
-                        pass
-                    mapping_path = str(log_base / "atmosphere-mapping.md")
-                    _Path(mapping_path).write_text(
-                        md_content, encoding="utf-8",
-                    )
-                    snapshot_recorder.set_mapping_path(mapping_path)
-                except Exception as e:
-                    logger.warning("写入 atmosphere-mapping.md 失败: %s", e)
-
-            # Step 7: 组装返回——内联完整映射
-            _session_mapping_generated = True
-            duration_ms = (time.monotonic() - t0) * 1000
-            result_text = (
-                "氛围组件扫描完成：\n"
-                + "\n".join(scan_lines)
-                + f"\n\n映射已生成：{total_props} 个氛围相关属性"
-                + (f" → {mapping_path}" if mapping_path else "")
-                + "\n\n---\n\n"
-                + md_content
-            )
-
-            await _log_harness_call(name, arguments, result_text, duration_ms)
-            return CallToolResult(content=[TextContent(type="text", text=result_text)])
-
-        if name == "vision_screenshot":
-            """Harness 截图工具 — 通过 capturer.capture() 统一获取截图。
-
-            Issue 015: 追加截图到当前 Vision Session + 可选针对性提问。
-            """
-            from harness.verification.capturer import capture as capturer_capture
-            t0 = time.monotonic()
-            try:
-                mode = arguments.get("mode", "viewport")
-                asset_path = arguments.get("asset_path", "")
-                hide_ui = arguments.get("hide_ui", False)
-                max_w, max_h = config.vision_max_size
-                screenshot = await capturer_capture(
-                    ue_client, max_w, max_h,
-                    mode=mode, asset_path=asset_path, hide_ui=hide_ui,
-                )
-                if pending_screenshot_ref is not None:
-                    pending_screenshot_ref[0] = screenshot
-                result_text = (
-                    f"Screenshot 已获取: {screenshot.width}x{screenshot.height}"
-                    f" {screenshot.mime_type} (mode={mode})"
-                )
-            except Exception as e:
-                if pending_screenshot_ref is not None:
-                    pending_screenshot_ref[0] = None
-                from harness.verification.debug import log_exception
-                log_exception(e, name)
-                return CallToolResult(
-                    content=[TextContent(type="text",
-                        text=f"截图失败: {type(e).__name__}: {e}")],
-                    isError=True,
-                )
-
-            # 手动触发 post 拦截器链 — 不经过 UE 透传路径，
-            # 必须在此处让 VisionInterceptor / SnapshotRecorder 消费截图结果
-            duration_ms = (time.monotonic() - t0) * 1000
-            event = ToolCallCompleted(
-                name=name,  # 保留原始工具名供 interceptor 路由
-                args=arguments,
-                raw_result={"content": [{"type": "text", "text": result_text}]},
-                parsed_text=result_text,
-                error=None,
-                duration_ms=duration_ms,
-            )
-            for ic in interceptors:
-                try:
-                    await ic.post_call(event)
-                except Exception as e:
-                    logger.error("后拦截 %s 失败: %s", type(ic).__name__, e)
-
-            # 008 / 007 / 015: 将 Vision 分析结果 + Session 状态追加到返回值
-            vision_info = ""
-            if world_state is not None and world_state.last_vision_verdict:
-                v = world_state.last_vision_verdict
-                badges = {"high": "🟢", "medium": "🟡", "low": "🔴"}
-                confidence = v.get("confidence", "medium")
-                badge = badges.get(confidence, "🟡")
-                answer = v.get("answer", "")
-                caveats = v.get("caveats", [])
-                observations = v.get("observations", [])
-
-                parts = ["\n\n[Vision 分析]"]
-                parts.append(f"置信度: {badge} {confidence}")
-                parts.append(f"回答: {answer if answer else '（Vision 返回为空或格式异常）'}")
-                if caveats:
-                    parts.append(f"限制: {'; '.join(caveats[:3])}")
-                if observations:
-                    obs_lines = []
-                    obs_badges = {"high": "✓", "medium": "~", "low": "?"}
-                    for o in observations[:8]:
-                        ob = obs_badges.get(o.get("confidence", ""), "~")
-                        obs_lines.append(
-                            f"  {ob} {o.get('what', '')}: {o.get('finding', '')}"
-                        )
-                    parts.append("分项观察:\n" + "\n".join(obs_lines))
-                vision_info = "\n".join(parts)
-
-            # Issue 015: 注入 Session 状态和过期警告
-            if vision_session_manager is not None:
-                session = vision_session_manager.get_active()
-                if session is not None:
-                    session_info = (
-                        f"\n\nSession: {session.id} "
-                        f"(截图 #{session.screenshot_count}，"
-                        f"累计 {session.question_count} 次提问)"
-                    )
-                    result_text += session_info
-                    warning = vision_session_manager.check_warning()
-                    if warning:
-                        vision_info = warning + "\n" + vision_info if vision_info else warning
-
-            return CallToolResult(
-                content=[TextContent(type="text", text=result_text + vision_info)]
-            )
-
-        # ---- UE 工具透传 ----
+        # 查注册表
+        for tool in _harness_tools:
+            if tool.name == name:
+                return await tool.handler(_ctx, arguments)
+
+        # UE 透传
         t_start = time.monotonic()
         error: Exception | None = None
 
@@ -1208,15 +944,12 @@ def build_server(
 
         if error:
             logger.error("工具调用失败: %s(%s) -> %s", name, arguments, error)
-            return CallToolResult(
-                content=[TextContent(type="text", text=f"错误: {error}")],
-                isError=True,
-            )
+            return tool_fail(f"错误: {error}")
 
         logger.info("LLM tools/call: %s 完成 (%.0fms)", name, duration_ms)
-        return CallToolResult(
-            content=[TextContent(type="text", text=result_text)]
-        )
+        return tool_ok(result_text)
+
+    # 挂一个调试用属性
 
     # 挂一个调试用属性
     server._harness_assemble_prompt = lambda state=None, skill=None: assemble_system_prompt(
