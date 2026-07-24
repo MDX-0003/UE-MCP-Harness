@@ -1091,7 +1091,7 @@ class TestRenderMappingMarkdown:
     """_render_mapping_markdown() 维度分组 JSON → Markdown 表格."""
 
     def test_basic_rendering(self):
-        from harness.server import _render_mapping_markdown
+        from harness.verification.atmosphere import _render_mapping_markdown
         mapping = {
             "brightness": [
                 {"actor_type": "DirectionalLight", "refPath": "/Game/DL.LC0",
@@ -1115,7 +1115,7 @@ class TestRenderMappingMarkdown:
         assert "共 3 个氛围相关属性" in md
 
     def test_empty_dimension_skipped(self):
-        from harness.server import _render_mapping_markdown
+        from harness.verification.atmosphere import _render_mapping_markdown
         mapping: dict = {
             "brightness": [],
             "contrast": [],
@@ -1125,7 +1125,7 @@ class TestRenderMappingMarkdown:
         assert "对比度" not in md
 
     def test_missing_dimension_key_skipped(self):
-        from harness.server import _render_mapping_markdown
+        from harness.verification.atmosphere import _render_mapping_markdown
         mapping = {
             "brightness": [
                 {"actor_type": "DirectionalLight", "property": "Intensity"},

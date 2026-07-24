@@ -22,7 +22,7 @@ from mcp.shared.context import RequestContext
 from harness.config import Config
 from harness.server import build_server
 from harness.interceptor import DebugPreCallInterceptor
-from harness.stop_limit import StopLimitInterceptor
+from harness.verification.reference import ReferenceImageSession, ref_build_stop_summary
 
 
 # ──────────────────────────────────────────────
@@ -73,14 +73,17 @@ def _setup_capturer_mock(monkeypatch):
 
 
 def _build_server_and_call(ue_client, stop_limit, tmp_path):
-    """构建 server 并返回 call_match 辅助函数。"""
+    """构建 server 并返回 call_match 辅助函数。
+
+    Note: Issue 019 removed stop_limit from build_server.
+    The session is now managed via ctx.ref_session inside handle_match_reference.
+    """
     ref_path = _make_ref_image(tmp_path)
     server = build_server(
         config=Config(),
         ue_client=ue_client,
         interceptors=[DebugPreCallInterceptor()],
         skills_dir=Path("skills"),
-        stop_limit=stop_limit,
     )
     handler_fn = server.request_handlers[CallToolRequest]
 
@@ -118,7 +121,7 @@ class TestCountdown:
     async def test_countdown_activates_at_hist_70(self, tmp_path: Path, monkeypatch):
         """hist≥0.70 首次达成 → 输出含倒计时提示。"""
         ue_client = AsyncMock()
-        sl = StopLimitInterceptor()
+        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
         call = _build_server_and_call(ue_client, sl, tmp_path)
 
@@ -140,7 +143,7 @@ class TestCountdown:
     async def test_countdown_hard_stop_after_3_rounds(self, tmp_path: Path, monkeypatch):
         """倒计时激活后 R1-R4 通过，R5 被硬拦截。"""
         ue_client = AsyncMock()
-        sl = StopLimitInterceptor()
+        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
         call = _build_server_and_call(ue_client, sl, tmp_path)
 
@@ -169,7 +172,7 @@ class TestCountdown:
     async def test_r1_achieve_70_max_4_rounds(self, tmp_path: Path, monkeypatch):
         """R1 达成 0.75 → R1-R4 通过，R5 被拦截。"""
         ue_client = AsyncMock()
-        sl = StopLimitInterceptor()
+        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
         call = _build_server_and_call(ue_client, sl, tmp_path)
 
@@ -203,7 +206,7 @@ class TestFallback10Rounds:
     async def test_no_countdown_10_round_fallback(self, tmp_path: Path, monkeypatch):
         """hist 始终 < 0.70 → 10 轮通过，11 轮被拦截。"""
         ue_client = AsyncMock()
-        sl = StopLimitInterceptor()
+        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
         call = _build_server_and_call(ue_client, sl, tmp_path)
 
@@ -235,7 +238,7 @@ class TestSaveLevelAsOnce:
     async def test_save_only_on_first_cross_70(self, tmp_path: Path, monkeypatch):
         """hist R1=0.65(<0.70) → R2=0.72(首次触发保存) → R3=0.80(不再保存)。"""
         ue_client = AsyncMock()
-        sl = StopLimitInterceptor()
+        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
         call = _build_server_and_call(ue_client, sl, tmp_path)
 
@@ -290,7 +293,7 @@ class TestSessionReset:
         ref2.rename(ref2_new)
 
         ue_client = AsyncMock()
-        sl = StopLimitInterceptor()
+        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
 
         with patch(
@@ -303,7 +306,7 @@ class TestSessionReset:
             server = build_server(
                 config=Config(), ue_client=ue_client,
                 interceptors=[DebugPreCallInterceptor()],
-                skills_dir=Path("skills"), stop_limit=sl,
+                skills_dir=Path("skills"),
             )
             handler_fn = server.request_handlers[CallToolRequest]
 
@@ -348,7 +351,7 @@ class TestOutputContent:
     async def test_round_display_shows_countdown(self, tmp_path: Path, monkeypatch):
         """倒计时激活后输出含"最多 N 轮"和倒计时提示。"""
         ue_client = AsyncMock()
-        sl = StopLimitInterceptor()
+        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
         call = _build_server_and_call(ue_client, sl, tmp_path)
 
@@ -369,7 +372,7 @@ class TestOutputContent:
     async def test_snapshot_message_mentions_editor_state(self, tmp_path: Path, monkeypatch):
         """快照消息应告知编辑器仍在原关卡。"""
         ue_client = AsyncMock()
-        sl = StopLimitInterceptor()
+        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
         call = _build_server_and_call(ue_client, sl, tmp_path)
 
@@ -394,17 +397,18 @@ class TestOutputContent:
 
 
 class TestStopLimitInterceptorUnit:
-    """StopLimitInterceptor.build_summary 单元测试。"""
+    """ref_build_stop_summary 单元测试 (Issue 019: 从 StopLimitInterceptor 迁移)。"""
 
     def test_build_summary_with_stop_reason(self):
         """stop_reason 出现在摘要首行。"""
-        sl = StopLimitInterceptor()
-        session_ref = {"_match_count": 4, "best_metrics": {
+        session = ReferenceImageSession()
+        session.match_count = 4
+        session.best_metrics = {
             "histogram_correlation": 0.82, "round": 1, "rb_ratio": 1.3,
-        }}
+        }
 
-        summary = sl.build_summary(
-            session_ref,
+        summary = ref_build_stop_summary(
+            session,
             best_snapshot_path="/Game/Maps/0714-Test",
             stop_reason="倒计时已归零",
         )
@@ -414,13 +418,14 @@ class TestStopLimitInterceptorUnit:
 
     def test_build_summary_loadlevel_wording(self):
         """LoadLevel 措辞含"仅当需要回退"和"请勿无故加载"。"""
-        sl = StopLimitInterceptor()
-        session_ref = {"_match_count": 4, "best_metrics": {
+        session = ReferenceImageSession()
+        session.match_count = 4
+        session.best_metrics = {
             "histogram_correlation": 0.82, "round": 1, "rb_ratio": 1.3,
-        }}
+        }
 
-        summary = sl.build_summary(
-            session_ref,
+        summary = ref_build_stop_summary(
+            session,
             best_snapshot_path="/Game/Maps/0714-Test",
             stop_reason="倒计时已归零",
         )
@@ -433,14 +438,14 @@ class TestStopLimitInterceptorUnit:
 
     def test_build_summary_no_snapshot(self):
         """无快照路径时不输出恢复提示。"""
-        sl = StopLimitInterceptor()
-        session_ref = {
-            "_match_count": 10,
-            "best_metrics": {"histogram_correlation": 0.85, "round": 3, "rb_ratio": 1.3},
+        session = ReferenceImageSession()
+        session.match_count = 10
+        session.best_metrics = {
+            "histogram_correlation": 0.85, "round": 3, "rb_ratio": 1.3,
         }
 
-        summary = sl.build_summary(
-            session_ref, best_snapshot_path=None, stop_reason="最大轮次",
+        summary = ref_build_stop_summary(
+            session, best_snapshot_path=None, stop_reason="最大轮次",
         )
 
         assert "LoadLevel" not in summary
@@ -448,11 +453,11 @@ class TestStopLimitInterceptorUnit:
 
     def test_build_summary_no_best_metrics(self):
         """无 best_metrics 时不输出指标轨迹。"""
-        sl = StopLimitInterceptor()
-        session_ref = {"_match_count": 10}
+        session = ReferenceImageSession()
+        session.match_count = 10
 
-        summary = sl.build_summary(
-            session_ref, stop_reason="已达到最大轮次限制（10 轮）",
+        summary = ref_build_stop_summary(
+            session, stop_reason="已达到最大轮次限制（10 轮）",
         )
 
         assert "最大轮次" in summary

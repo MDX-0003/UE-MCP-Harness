@@ -566,7 +566,7 @@ class TestBuildPropertyIndex:
 
     def test_build_property_index_structure(self):
         """Each entry should carry index, actor_type, actor_name, refPath, property."""
-        from harness.server import _build_property_index
+        from harness.verification.atmosphere import _build_property_index
 
         entries, next_idx = _build_property_index(
             actor_type="DirectionalLight",
@@ -595,7 +595,7 @@ class TestBuildPropertyIndex:
 
     def test_build_property_index_no_components(self):
         """Actor with no component refs: all props get actor refPath."""
-        from harness.server import _build_property_index
+        from harness.verification.atmosphere import _build_property_index
 
         entries, next_idx = _build_property_index(
             actor_type="PostProcessVolume",
@@ -617,7 +617,7 @@ class TestBuildMimoPrompt:
 
     def test_build_mimo_prompt_uses_indices(self):
         """Prompt should use [N] notation and instruct MiMo to output integers."""
-        from harness.server import _build_mimo_prompt
+        from harness.verification.atmosphere import _build_mimo_prompt
 
         entries = [
             {"index": 1, "actor_type": "DirectionalLight", "actor_name": "/Game/DL",
@@ -640,7 +640,7 @@ class TestBuildMimoPrompt:
 
     def test_build_mimo_prompt_shows_component_hint(self):
         """Component-level props should show which component they belong to."""
-        from harness.server import _build_mimo_prompt
+        from harness.verification.atmosphere import _build_mimo_prompt
 
         entries = [
             {"index": 1, "actor_type": "DirectionalLight", "actor_name": "/Game/DL",
@@ -657,7 +657,7 @@ class TestResolveMimoIndices:
 
     def test_resolve_mimo_indices_normal(self):
         """Valid indices should map back to correct property entries."""
-        from harness.server import _resolve_mimo_indices
+        from harness.verification.atmosphere import _resolve_mimo_indices
 
         property_index = [
             {"index": 1, "actor_type": "DL", "actor_name": "/Game/DL",
@@ -679,7 +679,7 @@ class TestResolveMimoIndices:
 
     def test_resolve_mimo_indices_filters_invalid(self):
         """Out-of-range and non-integer indices should be silently dropped."""
-        from harness.server import _resolve_mimo_indices
+        from harness.verification.atmosphere import _resolve_mimo_indices
 
         property_index = [
             {"index": 1, "actor_type": "DL", "actor_name": "/Game/DL",
@@ -696,7 +696,7 @@ class TestResolveMimoIndices:
 
     def test_resolve_mimo_indices_empty_dimension_skipped(self):
         """Dimensions with no valid indices should not appear in result."""
-        from harness.server import _resolve_mimo_indices
+        from harness.verification.atmosphere import _resolve_mimo_indices
 
         property_index = [
             {"index": 1, "actor_type": "DL", "actor_name": "/Game/DL",
@@ -711,7 +711,7 @@ class TestResolveMimoIndices:
 
     def test_resolve_mimo_indices_value_types(self):
         """Float indices (1.0) should work; string "1" should work."""
-        from harness.server import _resolve_mimo_indices
+        from harness.verification.atmosphere import _resolve_mimo_indices
 
         property_index = [
             {"index": 1, "actor_type": "DL", "actor_name": "/Game/DL",
@@ -732,7 +732,7 @@ class TestRenderMappingWithRefPath:
 
     def test_render_mapping_includes_refpath(self):
         """Markdown table should include refPath column."""
-        from harness.server import _render_mapping_markdown
+        from harness.verification.atmosphere import _render_mapping_markdown
 
         mapping = {
             "brightness": [

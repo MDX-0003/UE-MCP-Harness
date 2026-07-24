@@ -106,7 +106,6 @@ def cmd_start(args: argparse.Namespace) -> int:
     from harness.verification.config import load_vision_env
     from harness.verification.vision_agent import VisionSubAgent
     from harness.verification.interceptor import ReadbackInterceptor, VisionInterceptor
-    from harness.stop_limit import StopLimitInterceptor   # 0714: match_reference 硬终止兜底
     from harness.verification.drift_alert import DriftAlertInterceptor
     from harness.observability.snapshotter import SnapshotRecorder
     from harness.verification.capturer import init_shot_session, close_shot_session
@@ -219,12 +218,9 @@ def cmd_start(args: argparse.Namespace) -> int:
                 get_pending_screenshot=lambda: _pending_screenshot_ref[0],
             )
 
-            _stop_limit = StopLimitInterceptor()              # 0714: match_reference 硬终止兜底（Phase 3）
-
             interceptors: list[ToolCallInterceptor] = [
                 DebugPreCallInterceptor(),
                 ReadbackInterceptor(ue_client, _cache),   # 016: L2 读回验证（injects badge before logger）
-                _stop_limit,
                 tool_logger,
                 cache_interceptor,
                 DriftAlertInterceptor(_cache),   # 漂移时注入警告到 tool call 返回值
@@ -275,8 +271,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                                   snapshot_recorder=snapshot_recorder,
                                   pending_screenshot_ref=_pending_screenshot_ref,
                                   vision_session_manager=_vision_session_mgr,
-                                  skills_dir=_SKILLS_PATH,
-                                  stop_limit=_stop_limit)
+                                  skills_dir=_SKILLS_PATH)
 
             # 初始化 instructions：列出可用 Skill（含触发词，供 LLM 匹配用户意图）
             skill_registry = SkillRegistry(skills_dir=_SKILLS_PATH)
