@@ -135,6 +135,25 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
 | 008 State Cache | 默认透传 | **仅 `error is None` 时**更新缓存 | `name` (路由 handler), `args` (参数语义), `parsed_text` (结果语义) | 失败不更新，标记对应 toolset dirty |
 | 011 Safety (未来) | 检查规则 → DENY 抛异常 | 空 | `name`, `args` | — |
 
+### 修订段（2026-07-26，重构后）
+
+> 以下内容为 Contracts 1-2 的修订注记，记录重构后实际语义与原始示例代码的差异。
+> 原始示例代码保留不删，供历史对照。
+
+**pre_call 实际语义。** 原始示例代码中 `pre_call` 异常仅记录日志、继续执行；实际实现中异常会 `break` 出拦截器链并**跳过实际 UE 调用**。这意味着 `pre_call` 具有阻断能力——抛出异常的拦截器可以阻止下游 tool call。
+
+**结果解析已收敛。** 原始 `调用规范` 示例中的手动 JSON 解析和 `content[0].text` 提取已于 Issue 017 收敛为 `mcp_parse_result()` + `mcp_extract_text()` 两个公共函数。`ToolCallCompleted.parsed_text` 现在由 server.py 在 post 阶段之前统一解析一次（而非各 interceptor 自行解析）。
+
+**拦截器链已外移。** 原始示例中拦截器列表在 `build_server()` 内硬编码；实际实现在 `cli.py:cmd_start()` 中组装后传入 `build_server(interceptors=...)`。当前拦截器链为：
+
+```
+DebugPreCallInterceptor → ReadbackInterceptor → ToolCallLogger
+  → StateCacheInterceptor → DriftAlertInterceptor
+  → VisionInterceptor → SnapshotRecorder
+```
+
+**ToolContext 字段变更。** 重构后（Issues 017-019）`ToolContext` 移除了 `stop_limit`、`ref_is_first_load`、`ref_mapping_generated` 字段，新增 `ref_session: ReferenceImageSession` 替代原 `_session_reference` 裸字典。
+
 ### 当前 pre_call 验证方式
 
 003 和 008 暂时不需要 pre_call。为验证 pre_call 链路通畅，在 server.py 中注册一个简单的 debug interceptor：

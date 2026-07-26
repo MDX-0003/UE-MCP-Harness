@@ -27,7 +27,7 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 | 019 | match_reference 状态类化 + atmosphere 提取 | ✅ (commit 9b8bb24) | docs/issues/019-reference-session-extract.md |
 | 020 | 命名规整：前缀+功能全面对齐 | ✅ (commit 9b8bb24) | docs/issues/020-naming-convention-alignment.md |
 | 021 | 周边修复：Bug 修复 + 死代码清理 + CLI/Config | ✅ (commit 9b8bb24) | docs/issues/021-bug-fixes-and-cleanup.md |
-| 022 | 文档同步：架构/契约/词汇表回标 | ❌ 进行中 | docs/issues/022-documentation-sync.md |
+| 022 | 文档同步：架构/契约/词汇表回标 | ✅ (commit 10acdc6) | docs/issues/022-documentation-sync.md |
 | — | LevelPersistenceToolset (fingerprint/dirty/save 五工具) | ✅ 直连验证通过 | UE 侧插件, `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset/`, 详见 docs/contracts.md §4 |
 
 **全量测试：384 passed + 4 skipped（2026-07-26，重构后基线）。12 个预存失败（test_stop_limit 8 + test_build_atmosphere_mapping 4）待下一轮修复。**
