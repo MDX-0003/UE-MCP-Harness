@@ -55,15 +55,6 @@ class HardBoundaryResult:
     external_dirty: list[str] = field(default_factory=list)  # Harness 外产生的脏包路径
 
 
-def record_harness_dirty(packages: list[str]) -> None:
-    """记录 Harness 自身引发的脏包（在 write tool post_call 后调用）。
-
-    用于 dirty-diff：Hard Boundary 时排除这些已知脏包，
-    剩余的即为 Harness 外改动。
-    """
-    _harness_dirty_packages.update(packages)
-
-
 async def execute_hard_boundary(
     ue_client: McpClientSession,
     cache: WorldState,
@@ -76,7 +67,7 @@ async def execute_hard_boundary(
     1. L3 全量刷新 → 重建 State Cache
     2. 指纹比对（LevelPersistenceToolset 已安装时）
     3. dirty-diff 漂移检测（过滤 /Script/ 噪声包）
-    4. 填充 WorldState 的 last_full_refresh 时间戳
+    4. 填充 WorldState 的 last_state_full_refresh 时间戳
 
     Args:
         ue_client: 已连接的 UE MCP 客户端。
@@ -89,10 +80,10 @@ async def execute_hard_boundary(
     error_occurred = False
 
     # ── 1. L3 全量刷新 ──
-    from harness.state.refresher import full_refresh
+    from harness.state.refresher import state_full_refresh
 
     try:
-        await full_refresh(ue_client, cache)
+        await state_full_refresh(ue_client, cache)
         result.refreshed = True
     except Exception as e:
         logger.warning("Hard Boundary L3 刷新失败: %s", e)
@@ -145,7 +136,7 @@ async def execute_hard_boundary(
         logger.debug("dirty-diff 不可用: %s", e)
 
     # ── 4. 记录时间 ──
-    cache.last_full_refresh = datetime.now(timezone.utc)
+    cache.last_state_full_refresh = datetime.now(timezone.utc)
     cache._needs_refresh = False
 
     if result.fingerprint_match is True:

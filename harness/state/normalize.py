@@ -86,7 +86,7 @@ def normalize_tool_args(short_name: str, args: dict) -> NormalizedCall:
         )
 
     # 3. 从 refPath 提取 actor_name 和 component_name
-    actor_name, component_name = _parse_ref_path(ref_path)
+    actor_name, component_name = state_parse_ref_path(ref_path)
 
     return NormalizedCall(
         actor_name=actor_name,
@@ -98,7 +98,7 @@ def normalize_tool_args(short_name: str, args: dict) -> NormalizedCall:
 
 # ---- 辅助函数 ----
 
-def _parse_ref_path(ref_path: str) -> tuple[str, str]:
+def state_parse_ref_path(ref_path: str) -> tuple[str, str]:
     """从 UE refPath 中提取 actor 名和组件名。
 
     refPath 格式示例：
@@ -205,7 +205,7 @@ def mcp_tool_short_name(full_name: str) -> str:
 
 
 # 过渡别名（Issue 020 删除）
-extract_short_name = mcp_tool_short_name
+# Issue 020: extract_short_name 别名已废止，直接使用 mcp_tool_short_name
 
 
 def state_parse_actor_names(result: str) -> list[str]:
@@ -278,7 +278,7 @@ def _resolve_actor_list(data: Any) -> list[str] | None:
             for obj in data:
                 ref = obj.get("refPath", "") if isinstance(obj, dict) else ""
                 if ref:
-                    actor_name, _ = _parse_ref_path(ref)
+                    actor_name, _ = state_parse_ref_path(ref)
                     if actor_name:
                         names.append(actor_name)
             return names

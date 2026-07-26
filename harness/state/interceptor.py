@@ -10,8 +10,7 @@ import logging
 from typing import Callable, TYPE_CHECKING
 
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
-from harness.state.normalize import normalize_tool_args, _parse_ref_path  # P0-1: 共享参数归一化
-from harness.verification.session import record_write  # Issue 015: 操作记录供 Vision context 注入
+from harness.state.normalize import normalize_tool_args, state_parse_ref_path  # P0-1: 共享参数归一化
 
 if TYPE_CHECKING:
     from harness.state.models import WorldState
@@ -28,9 +27,14 @@ class StateCacheInterceptor(ToolCallInterceptor):
     仅实现 post_call（确认 UE 返回成功后才更新缓存，避免乐观更新的回滚问题）。
     """
 
-    def __init__(self, cache: WorldState) -> None:
+    def __init__(
+        self,
+        cache: WorldState,
+        on_write: Callable[[str, dict], None] | None = None,
+    ) -> None:
         self._cache = cache
         self._handlers: dict[str, CacheHandler] = _build_handlers()
+        self._on_write = on_write  # Step 2: 回调注入，替代直接 import record_write
 
     # ---- ToolCallInterceptor ----
 
@@ -55,6 +59,10 @@ class StateCacheInterceptor(ToolCallInterceptor):
             try:
                 handler(self._cache, event)
                 logger.debug("缓存更新: %s", event.name)
+                # Step 2: 所有 handler 统一走回调，不依赖各 handler 手动调 record_write
+                if self._on_write is not None:
+                    short = event.name.split(".")[-1] if "." in event.name else event.name
+                    self._on_write(short, event.args)
             except Exception as e:
                 logger.warning("缓存更新失败: %s — %s", event.name, e)
         elif _is_write_tool(event.name):
@@ -121,8 +129,6 @@ def _handle_set_transform(cache: WorldState, event: ToolCallCompleted) -> None:
         cache.actors[nc.actor_name].transform = nc.payload.get("xform", {})
         cache.dirty_actors.add(nc.actor_name)
         _touch_actor(cache, nc.actor_name)
-    # Issue 015: 记录到 Recent Writes Buffer
-    record_write("set_actor_transform", event.args)
 
 
 def _handle_set_properties(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -134,7 +140,6 @@ def _handle_set_properties(cache: WorldState, event: ToolCallCompleted) -> None:
         _touch_actor(cache, nc.actor_name)
         if nc.payload:
             cache.actors[nc.actor_name].properties.update(nc.payload)
-    record_write("set_properties", event.args)
 
 
 def _handle_add_to_scene(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -154,9 +159,6 @@ def _handle_add_to_scene(cache: WorldState, event: ToolCallCompleted) -> None:
         cache.actors[actor_name] = snap
         cache.dirty_actors.add(actor_name)
         _touch_actor(cache, actor_name)
-    # 区分 class 和 asset 来源
-    write_name = "add_to_scene_from_class"
-    record_write(write_name, event.args)
 
 
 def _handle_remove_from_scene(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -166,7 +168,6 @@ def _handle_remove_from_scene(cache: WorldState, event: ToolCallCompleted) -> No
         cache.actors[actor_name].deleted = True
         cache.dirty_actors.add(actor_name)
         _touch_actor(cache, actor_name)
-    record_write("remove_from_scene", event.args)
 
 
 def _handle_set_label(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -177,7 +178,6 @@ def _handle_set_label(cache: WorldState, event: ToolCallCompleted) -> None:
         cache.actors[nc.actor_name].label = nc.payload.get("label", "")
         cache.dirty_actors.add(nc.actor_name)
         _touch_actor(cache, nc.actor_name)
-    record_write("set_label", event.args)
 
 
 def _handle_add_tag(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -190,7 +190,6 @@ def _handle_add_tag(cache: WorldState, event: ToolCallCompleted) -> None:
             cache.actors[nc.actor_name].tags.append(tag)
         cache.dirty_actors.add(nc.actor_name)
         _touch_actor(cache, nc.actor_name)
-    record_write("add_tag", event.args)
 
 
 def _handle_remove_tag(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -203,7 +202,6 @@ def _handle_remove_tag(cache: WorldState, event: ToolCallCompleted) -> None:
             pass
         cache.dirty_actors.add(nc.actor_name)
         _touch_actor(cache, nc.actor_name)
-    record_write("remove_tag", event.args)
 
 
 def _handle_add_component(cache: WorldState, event: ToolCallCompleted) -> None:
@@ -291,7 +289,7 @@ def _handle_get_class(cache: WorldState, event: ToolCallCompleted) -> None:
             if isinstance(rv, dict):
                 class_ref = rv.get("refPath", "")
                 if class_ref and nc.actor_name in cache.actors:
-                    class_name, _ = _parse_ref_path(class_ref)
+                    class_name, _ = state_parse_ref_path(class_ref)
                     if class_name:
                         cache.actors[nc.actor_name].class_name = class_name
                         logger.debug("get_class 回填: %s → %s", nc.actor_name, class_name)

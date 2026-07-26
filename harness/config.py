@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,7 +64,7 @@ class Config:
     # 006 Vision Pipeline — Vision API 配置
     vision_api_key: str = ""  # 在 .vision.env 中填写
     vision_api_base_url: str = "https://token-plan-cn.xiaomimimo.com"
-    vision_model: str = "mimo-v2.5-pro"  # 带 vision 能力的模型
+    vision_model: str = "claude-sonnet-4-6"  # 带 vision 能力的模型
     vision_max_size: tuple[int, int] = (1024, 768)  # 截图 resize 最大尺寸
 
     # 日志
@@ -132,28 +133,7 @@ class Config:
             overrides["ue_screenshot_dir"] = ue_screenshot_dir
         if not overrides:
             return self
-        # 直接构造新实例（Python 3.14 移除了 dataclasses.replace）
-        current = {
-            "ue_port": self.ue_port,
-            "ue_host": self.ue_host,
-            "ue_project_root": self.ue_project_root,
-            "ue_screenshot_dir": self.ue_screenshot_dir,
-            "listen_host": self.listen_host,
-            "listen_port": self.listen_port,
-            "mcp_protocol_version": self.mcp_protocol_version,
-            "request_timeout": self.request_timeout,
-            "sse_read_timeout": self.sse_read_timeout,
-            "preload_all_toolsets": self.preload_all_toolsets,
-            "log_level": self.log_level,
-            "log_dir": self.log_dir,
-            "default_tools_allowlist": self.default_tools_allowlist,
-            "default_tools_denylist": self.default_tools_denylist,
-            "vision_debug": self.vision_debug,
-            "vision_api_key": self.vision_api_key,
-            "vision_api_base_url": self.vision_api_base_url,
-            "vision_model": self.vision_model,
-            "vision_max_size": self.vision_max_size,
-        }
+        current = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
         current.update(overrides)
         return Config(**current)
 

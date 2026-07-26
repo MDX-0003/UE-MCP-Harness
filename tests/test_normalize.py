@@ -4,40 +4,40 @@ import pytest
 from harness.state.normalize import (
     NormalizedCall,
     normalize_tool_args,
-    _parse_ref_path,
+    state_parse_ref_path,
     _extract_payload,
-    extract_short_name,
+    mcp_tool_short_name,
 )
 
 
 class TestParseRefPath:
-    """测试 _parse_ref_path 从 UE refPath 中提取 actor/component 名。"""
+    """测试 state_parse_ref_path 从 UE refPath 中提取 actor/component 名。"""
 
     def test_actor_only(self) -> None:
-        assert _parse_ref_path(
+        assert state_parse_ref_path(
             "/Game/NewWorld.NewWorld:PersistentLevel.SpotLight_0"
         ) == ("SpotLight_0", "")
 
     def test_actor_with_component(self) -> None:
-        assert _parse_ref_path(
+        assert state_parse_ref_path(
             "/Game/NewWorld.NewWorld:PersistentLevel.SpotLight_0.LightComponent0"
         ) == ("SpotLight_0", "LightComponent0")
 
     def test_static_mesh_actor(self) -> None:
-        assert _parse_ref_path(
+        assert state_parse_ref_path(
             "/Game/NewWorld.NewWorld:PersistentLevel.StaticMeshActor_7"
         ) == ("StaticMeshActor_7", "")
 
     def test_class_ref(self) -> None:
-        assert _parse_ref_path(
+        assert state_parse_ref_path(
             "/Script/Engine.SpotLight"
         ) == ("SpotLight", "")
 
     def test_empty_path(self) -> None:
-        assert _parse_ref_path("") == ("", "")
+        assert state_parse_ref_path("") == ("", "")
 
     def test_deep_nested(self) -> None:
-        assert _parse_ref_path(
+        assert state_parse_ref_path(
             "/Game/Maps/Level.Level:PersistentLevel.MyActor.SubComp.LightComponent0"
         ) == ("SubComp", "LightComponent0")
 
@@ -197,20 +197,20 @@ class TestNormalizeToolArgs:
 
 
 class TestExtractShortName:
-    """测试 extract_short_name。"""
+    """测试 mcp_tool_short_name。"""
 
     def test_python_toolset(self) -> None:
-        assert extract_short_name(
+        assert mcp_tool_short_name(
             "toolset_registry.toolsets.core.actor.ActorTools.set_actor_transform"
         ) == "set_actor_transform"
 
     def test_cpp_toolset(self) -> None:
-        assert extract_short_name(
+        assert mcp_tool_short_name(
             "ToolsetRegistry.EditorAppToolset.GetSelectedActors"
         ) == "GetSelectedActors"
 
     def test_already_short(self) -> None:
-        assert extract_short_name("vision_screenshot") == "vision_screenshot"
+        assert mcp_tool_short_name("vision_screenshot") == "vision_screenshot"
 
 
 class TestInferClassName:

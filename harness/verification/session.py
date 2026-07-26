@@ -484,8 +484,9 @@ def build_full_prompt_context(
         last = session.question_log[-1]
         last_v = last.get("verdict", {})
         if last_v:
-            passed = "✅" if last_v.get("pass") else "❌"
-            reason = last_v.get("reason", "")[:500]
+            confidence = last_v.get("confidence", "medium")
+            passed = "✅" if confidence == "high" else "❌"
+            reason = last_v.get("answer", "")[:500]
             blocks.append((3, f"上次验证结果：{passed} {reason}"))
 
     if not blocks:

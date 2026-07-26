@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Callable
 
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
+from harness.state.normalize import mcp_tool_short_name
+from harness.verification.interceptor import is_screenshot_tool
 
 logger = logging.getLogger("harness.observability.logger")
 
@@ -120,7 +122,7 @@ class ToolCallLogger(ToolCallInterceptor):
         对冗长工具（list_properties 等）做智能摘要，对截图工具注入
         screenshot 路径和 Vision 判断结果。
         """
-        short = _short_name(event.name)
+        short = mcp_tool_short_name(event.name)
         entry = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "tool": short,
@@ -131,7 +133,7 @@ class ToolCallLogger(ToolCallInterceptor):
         }
 
         # 截图工具附加字段
-        if _is_screenshot_tool(short):
+        if is_screenshot_tool(short):
             entry["screenshot"] = self._get_screenshot_path()
             verdict = self._get_verdict()
             if verdict:
@@ -145,23 +147,6 @@ class ToolCallLogger(ToolCallInterceptor):
             await self._write_queue.put(line)
         except Exception:
             logger.exception("序列化日志行失败: %s", event.name)
-
-
-# ---- 辅助 ----
-
-_SCREENSHOT_NAMES = frozenset({
-    "vision_screenshot",
-    "CaptureEditorImage", "CaptureAssetImage",
-})
-
-
-def _short_name(full: str) -> str:
-    """ToolsetRegistry.EditorAppToolset.CaptureAssetImage → CaptureAssetImage"""
-    return full.split(".")[-1] if "." in full else full
-
-
-def _is_screenshot_tool(short_name: str) -> bool:
-    return short_name in _SCREENSHOT_NAMES
 
 
 def _format_output(short_name: str, text: str | None) -> str | None:

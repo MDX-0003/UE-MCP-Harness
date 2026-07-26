@@ -349,23 +349,6 @@ class McpClientSession:
             raise resp.error
         return resp.result.get("tools", [])
 
-    async def call_tool_blocking(self, name: str, arguments: dict | None = None) -> str:
-        """调用 UE 端工具，使用阻塞式 post() 读取完整 SSE 响应。
-
-        与 call_tool() 的 stream() + aiter_lines() 不同，此方法使用
-        httpx.post() 的 response.content 阻塞读取——等服务器在最后
-        一次 OnComplete 后关闭连接再返回。用于避开 UE HTTP Server
-        MultipleWriteStream 跨线程写入的延迟/丢失问题。
-        """
-        await self._ensure_connected()
-        resp, _ = await self._rpc("tools/call", {
-            "name": name,
-            "arguments": arguments or {},
-        })
-        if resp.error:
-            raise resp.error
-        return json.dumps(resp.result, ensure_ascii=False)
-
     async def call_tool(self, name: str, arguments: dict | None = None) -> str:
         """调用 UE 端的指定工具，增量处理 SSE 事件流。
 

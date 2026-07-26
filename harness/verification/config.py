@@ -4,7 +4,7 @@ Vision Sub-Agent 是 Harness 中唯一需要 LLM API 的模块。
 其配置独立于主 Harness 配置，存储在项目根目录的 .vision.env 文件中。
 
 用法：
-    from harness.verification.config import load_vision_env, VisionConfig
+    from harness.verification.config import load_vision_env
 
     load_vision_env()            # 将 .vision.env 加载到 os.environ
     config = Config.from_env()   # 随后 Config.from_env() 可读取 vision_* 环境变量
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger("harness.verification.config")
@@ -25,16 +24,6 @@ VISION_ENV_FILE = ".vision.env"
 # 默认值
 DEFAULT_VISION_API_BASE_URL = "https://token-plan-cn.xiaomimimo.com"
 DEFAULT_VISION_MODEL = "claude-sonnet-4-6"
-
-
-@dataclass
-class VisionConfig:
-    """Vision Sub-Agent 的独立配置快照。"""
-
-    api_key: str = ""
-    api_base_url: str = DEFAULT_VISION_API_BASE_URL
-    model: str = DEFAULT_VISION_MODEL
-    max_size: tuple[int, int] = (1024, 768)
 
 
 def load_vision_env(project_root: Path | None = None) -> bool:

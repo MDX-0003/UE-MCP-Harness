@@ -25,7 +25,7 @@ from typing import Callable, TYPE_CHECKING
 from harness.client import mcp_extract_text, mcp_unwrap_return_value
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
 from harness.state.models import WorldState
-from harness.state.normalize import extract_short_name, normalize_tool_args
+from harness.state.normalize import mcp_tool_short_name, normalize_tool_args
 from harness.verification.capturer import parse_screenshot, Screenshot
 from harness.verification.vision_agent import VisionSubAgent
 
@@ -84,7 +84,7 @@ class VisionInterceptor(ToolCallInterceptor):
         if event.error is not None:
             return
 
-        if not _is_screenshot_tool(event.name) and event.name != "vision_screenshot":
+        if not is_screenshot_tool(event.name) and event.name != "vision_screenshot":
             return
 
         # —— 路径 A: Harness vision_screenshot ——
@@ -206,7 +206,7 @@ class ReadbackInterceptor(ToolCallInterceptor):
     
         # event.name = "toolset_registry.toolsets.core.object.ObjectTools.set_properties"
         # short = "set_properties"
-        short = extract_short_name(event.name)
+        short = mcp_tool_short_name(event.name)
         readback_short = _READBACK_MAP.get(short)
         if readback_short is None:
             return
@@ -480,7 +480,7 @@ def _confirm_cache(
 
 # ---- 工具名检测 ----
 
-def _is_screenshot_tool(name: str) -> bool:
+def is_screenshot_tool(name: str) -> bool:
     """
     判断工具名是否属于UE的截图工具（短名关键词匹配，大小写不敏感）。
     不论这个tool来自harness自己的tool还是ue的tool，都会return ture

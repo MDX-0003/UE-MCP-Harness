@@ -9,7 +9,7 @@ ToolCallInterceptor 的 post_call 实现，将关键会话状态持久化到磁�
 设计约束：
   - 仅覆盖 post_call，不改变工具调用结果
   - 文件 I/O 异常不阻断主链路
-  - 复用 verification/interceptor.py 的 _is_screenshot_tool / _extract_image_base64
+  - 复用 verification/interceptor.py 的 is_screenshot_tool / _extract_image_base64
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
 _last_saved_screenshot_path: str | None = None
 from harness.state.models import WorldState
 from harness.verification.capturer import parse_screenshot, Screenshot
-from harness.verification.interceptor import _is_screenshot_tool
+from harness.verification.interceptor import is_screenshot_tool
 
 logger = logging.getLogger("harness.observability.snapshotter")
 
@@ -109,7 +109,7 @@ class SnapshotRecorder(ToolCallInterceptor):
         if event.error is not None:
             return
 
-        if _is_screenshot_tool(event.name):
+        if is_screenshot_tool(event.name):
             self._handle_screenshot(event)
 
         if event.name == "get_context":

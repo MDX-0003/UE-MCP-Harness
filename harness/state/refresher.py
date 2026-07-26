@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("harness.state.refresher")
 
 
-async def full_refresh(
+async def state_full_refresh(
     ue_client: McpClientSession,
     cache: WorldState,
 ) -> None:
@@ -75,7 +75,7 @@ async def full_refresh(
     cache.dirty_toolsets.clear()
 
     from datetime import datetime, timezone
-    cache.last_full_refresh = datetime.now(timezone.utc)
+    cache.last_state_full_refresh = datetime.now(timezone.utc)
 
     actor_count = sum(1 for a in cache.actors.values() if not a.deleted)
     logger.info("L3 刷新完成: 地图=%s, Actor=%d, 选中=%d",

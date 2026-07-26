@@ -49,7 +49,11 @@ def _find_log_file(log_dir: Path, session_id: str | None = None) -> Path | None:
     if not log_dir.exists():
         return None
 
-    jsonl_files = sorted(log_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # 优先搜索子目录中的 tool_calls.jsonl（当前日志格式），
+    # 回退到顶层 *.jsonl（兼容旧格式）
+    jsonl_files = sorted(log_dir.rglob("tool_calls.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not jsonl_files:
+        jsonl_files = sorted(log_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not jsonl_files:
         return None
 
@@ -89,7 +93,7 @@ def _print_stats(entries: list[dict[str, Any]], log_path: Path) -> None:
     # 按 tool_name 分组
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for e in entries:
-        name = e.get("tool_name", "unknown")
+        name = e.get("tool", "unknown")
         groups[name].append(e)
 
     print(f"日志文件: {log_path}")
@@ -103,7 +107,7 @@ def _print_stats(entries: list[dict[str, Any]], log_path: Path) -> None:
         calls = groups[name]
         count = len(calls)
         errs = sum(1 for c in calls if c.get("error"))
-        durations = [c.get("duration_ms", 0.0) for c in calls]
+        durations = [c.get("ms", 0.0) for c in calls]
         avg_ms = sum(durations) / len(durations) if durations else 0.0
         max_ms = max(durations) if durations else 0.0
         err_pct = (errs / count * 100) if count > 0 else 0.0
@@ -112,7 +116,7 @@ def _print_stats(entries: list[dict[str, Any]], log_path: Path) -> None:
     print("-" * 80)
 
     # 全量统计
-    all_durations = [e.get("duration_ms", 0.0) for e in entries]
+    all_durations = [e.get("ms", 0.0) for e in entries]
     if all_durations:
         avg_all = sum(all_durations) / len(all_durations)
         max_all = max(all_durations)

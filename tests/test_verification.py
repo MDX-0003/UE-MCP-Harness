@@ -8,7 +8,6 @@ import pytest
 
 from harness.config import Config
 from harness.verification.config import (
-    VisionConfig,
     VISION_ENV_FILE,
     DEFAULT_VISION_API_BASE_URL,
     DEFAULT_VISION_MODEL,
@@ -49,28 +48,6 @@ class TestVisionConfigField:
     def test_vision_model_default(self) -> None:
         cfg = Config()
         assert cfg.vision_model  # 有值即可（用户可能自定义）
-
-
-# ---- VisionConfig dataclass ----
-
-class TestVisionConfigDataclass:
-    """测试独立 VisionConfig。"""
-
-    def test_defaults(self) -> None:
-        vc = VisionConfig()
-        assert vc.api_key == ""
-        assert vc.api_base_url == DEFAULT_VISION_API_BASE_URL
-        assert vc.model == DEFAULT_VISION_MODEL
-        assert vc.max_size == (1024, 768)
-
-    def test_custom_values(self) -> None:
-        vc = VisionConfig(
-            api_key="sk-ant-custom",
-            api_base_url="https://proxy.example.com/anthropic",
-            model="claude-opus-4-8",
-        )
-        assert vc.api_key == "sk-ant-custom"
-        assert vc.api_base_url == "https://proxy.example.com/anthropic"
 
 
 # ---- .vision.env 加载 ----
@@ -445,15 +422,15 @@ class TestFindLatestScreenshot:
 
 
 class TestCaptureModeValidation:
-    """capture() mode 语义校验。"""
+    """capture_screenshot() mode 语义校验。"""
 
     def test_asset_empty_path_raises_value_error(self) -> None:
-        from harness.verification.capturer import capture
+        from harness.verification.capturer import capture_screenshot
         import asyncio
 
         async def run() -> None:
             with pytest.raises(ValueError, match="mode='asset' requires non-empty asset_path"):
-                await capture(
+                await capture_screenshot(
                     ue_client=None,  # type: ignore[arg-type]
                     mode="asset",
                     asset_path="",
@@ -462,12 +439,12 @@ class TestCaptureModeValidation:
         asyncio.run(run())
 
     def test_invalid_mode_raises_value_error(self) -> None:
-        from harness.verification.capturer import capture
+        from harness.verification.capturer import capture_screenshot
         import asyncio
 
         async def run() -> None:
             with pytest.raises(ValueError, match="无效的截图模式"):
-                await capture(
+                await capture_screenshot(
                     ue_client=None,  # type: ignore[arg-type]
                     mode="invalid_mode",
                 )
@@ -475,8 +452,8 @@ class TestCaptureModeValidation:
         asyncio.run(run())
 
     def test_no_shot_session_raises_runtime_error(self) -> None:
-        """未初始化截图 session 时调用 capture 应抛 RuntimeError。"""
-        from harness.verification.capturer import capture, _shot_client as shot_client_mod
+        """未初始化截图 session 时调用 capture_screenshot 应抛 RuntimeError。"""
+        from harness.verification.capturer import capture_screenshot, _shot_client as shot_client_mod
         import asyncio
 
         # 确保 _shot_client 为 None
@@ -486,7 +463,7 @@ class TestCaptureModeValidation:
         try:
             async def run() -> None:
                 with pytest.raises(RuntimeError, match="截图 session 未初始化"):
-                    await capture(
+                    await capture_screenshot(
                         ue_client=None,  # type: ignore[arg-type]
                         mode="viewport",
                     )
@@ -496,7 +473,7 @@ class TestCaptureModeValidation:
 
 
 class TestCaptureWithFileFallback:
-    """capture() viewport 模式文件 fallback 集成测试。"""
+    """capture_screenshot() viewport 模式文件 fallback 集成测试。"""
 
     @pytest.fixture
     def _setup_shot_client(self) -> object:
@@ -513,7 +490,7 @@ class TestCaptureWithFileFallback:
     ) -> None:
         """httpx.ReadTimeout + 新 PNG → 返回 capture_from_file() 结果。"""
         from harness.verification.capturer import (
-            capture,
+            capture_screenshot,
             _shot_client as shot_client_mod,
             _ue_screenshot_dir as screenshot_dir_mod,
         )
@@ -553,7 +530,7 @@ class TestCaptureWithFileFallback:
                 from PIL import Image
                 # 模拟 PIL 可用时的情况
                 try:
-                    result = await capture(
+                    result = await capture_screenshot(
                         ue_client=mock_client,
                         mode="viewport",
                         max_width=256,
@@ -563,7 +540,7 @@ class TestCaptureWithFileFallback:
                     assert len(result.data_b64) > 0
                 except ImportError:
                     # PIL 不可用时 capture_from_file 仍应工作
-                    result = await capture(
+                    result = await capture_screenshot(
                         ue_client=mock_client,
                         mode="viewport",
                         max_width=256,
@@ -580,7 +557,7 @@ class TestCaptureWithFileFallback:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """ReadTimeout 且无合适的 fallback 文件 → 原异常重新抛出。"""
-        from harness.verification.capturer import capture
+        from harness.verification.capturer import capture_screenshot
         from unittest.mock import AsyncMock, MagicMock
         import asyncio
         import httpx
@@ -600,7 +577,7 @@ class TestCaptureWithFileFallback:
 
             async def run() -> None:
                 with pytest.raises(httpx.ReadTimeout):
-                    await capture(
+                    await capture_screenshot(
                         ue_client=mock_client,
                         mode="viewport",
                     )
@@ -615,7 +592,7 @@ class TestCaptureWithFileFallback:
     ) -> None:
         """JsonRpcError(-32000, SSE 流结束...) + 新 PNG → fallback。"""
         from harness.client import JsonRpcError
-        from harness.verification.capturer import capture
+        from harness.verification.capturer import capture_screenshot
         from unittest.mock import AsyncMock, MagicMock
         import asyncio
 
@@ -646,7 +623,7 @@ class TestCaptureWithFileFallback:
             capturer_mod._ue_screenshot_dir = shot_dir
 
             async def run() -> None:
-                result = await capture(
+                result = await capture_screenshot(
                     ue_client=mock_client,
                     mode="viewport",
                     max_width=128,
@@ -664,7 +641,7 @@ class TestCaptureWithFileFallback:
     ) -> None:
         """其他 JsonRpcError 不应进入 fallback，原样抛出。"""
         from harness.client import JsonRpcError
-        from harness.verification.capturer import capture
+        from harness.verification.capturer import capture_screenshot
         from unittest.mock import AsyncMock, MagicMock
         import asyncio
 
@@ -686,7 +663,7 @@ class TestCaptureWithFileFallback:
 
             async def run() -> None:
                 with pytest.raises(JsonRpcError) as exc_info:
-                    await capture(
+                    await capture_screenshot(
                         ue_client=mock_client,
                         mode="viewport",
                     )
@@ -702,7 +679,7 @@ class TestCaptureWithFileFallback:
     ) -> None:
         """mode='asset' 不走文件 fallback，即使配置了截图目录。"""
         from harness.client import JsonRpcError
-        from harness.verification.capturer import capture
+        from harness.verification.capturer import capture_screenshot
         from unittest.mock import AsyncMock, MagicMock
         import asyncio
 
@@ -735,7 +712,7 @@ class TestCaptureWithFileFallback:
             async def run() -> None:
                 # Asset mode 有 asset_path → 不走 fallback，原异常直接抛出
                 with pytest.raises(JsonRpcError):
-                    await capture(
+                    await capture_screenshot(
                         ue_client=mock_client,
                         mode="asset",
                         asset_path="/Engine/BasicShapes/foo.foo",

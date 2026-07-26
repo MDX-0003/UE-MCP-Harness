@@ -2,7 +2,7 @@
 
 import pytest
 
-from harness.context.filter import apply_filter, is_escape_hatch, ESCAPE_HATCH_TOOLS
+from harness.context.filter import ctx_filter_tools, is_escape_hatch, ESCAPE_HATCH_TOOLS
 from harness.context.prompt import (
     SystemContextProvider,
     TaskContextProvider,
@@ -38,14 +38,14 @@ class TestApplyFilter:
 
     def test_escape_hatch_always_visible(self) -> None:
         """逃生通道工具始终可见。"""
-        result = apply_filter(self.RAW_TOOLS, self.ALLOWLIST)
+        result = ctx_filter_tools(self.RAW_TOOLS, self.ALLOWLIST)
         names = [t["name"] for t in result]
         assert "list_toolsets" in names
         assert "describe_toolset" in names
 
     def test_allowlist_match(self) -> None:
         """allowlist 匹配的工具被保留。"""
-        result = apply_filter(self.RAW_TOOLS, self.ALLOWLIST)
+        result = ctx_filter_tools(self.RAW_TOOLS, self.ALLOWLIST)
         names = [t["name"] for t in result]
         assert "ToolsetRegistry.EditorAppToolset.GetSelectedActors" in names
         assert "ToolsetRegistry.EditorAppToolset.SelectActors" in names
@@ -54,20 +54,20 @@ class TestApplyFilter:
 
     def test_non_matching_filtered_out(self) -> None:
         """不匹配 allowlist 的工具被过滤。"""
-        result = apply_filter(self.RAW_TOOLS, self.ALLOWLIST)
+        result = ctx_filter_tools(self.RAW_TOOLS, self.ALLOWLIST)
         names = [t["name"] for t in result]
         assert "ToolsetRegistry.LogsToolset.GetLogEntries" not in names
         assert "toolset_registry.toolsets.core.niagara.NiagaraToolsets.spawn" not in names
 
     def test_empty_allowlist(self) -> None:
         """空 allowlist 只保留逃生通道。"""
-        result = apply_filter(self.RAW_TOOLS, ())
+        result = ctx_filter_tools(self.RAW_TOOLS, ())
         names = [t["name"] for t in result]
         assert set(names) == {"list_toolsets", "describe_toolset"}
 
     def test_extra_allowed(self) -> None:
         """extra_allowed 可以放行额外工具。"""
-        result = apply_filter(
+        result = ctx_filter_tools(
             self.RAW_TOOLS, self.ALLOWLIST,
             extra_allowed=frozenset({"GetLogEntries"}),
         )

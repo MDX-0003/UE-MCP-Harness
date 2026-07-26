@@ -174,13 +174,13 @@ def cmd_start(args: argparse.Namespace) -> int:
         snapshot_recorder = None
 
         # 008 缓存拦截器（无 session 依赖，可提前创建）
-        cache_interceptor = StateCacheInterceptor(_cache)
+        cache_interceptor = StateCacheInterceptor(_cache, on_write=record_write)
 
         # 007 视觉验证拦截器（无 session 依赖）
         vision_agent = VisionSubAgent(config)
 
         # Issue 015: Vision Session Manager
-        from harness.verification.session import VisionSessionManager
+        from harness.verification.session import VisionSessionManager, record_write
         _vision_session_mgr = VisionSessionManager(
             config, world_state=_cache,
             log_dir=config.log_dir,
@@ -200,11 +200,11 @@ def cmd_start(args: argparse.Namespace) -> int:
             session_id = ue_client.session_id or session_id
 
             # 2. 用真实 session_id 创建日志和快照记录器
-            from harness.observability.snapshotter import _last_saved_screenshot_path as _ss_path_ref
+            import harness.observability.snapshotter as _snap_mod
             tool_logger = ToolCallLogger(
                 config.log_dir, session_id,
                 get_verdict=lambda: _cache.last_vision_verdict,
-                get_screenshot_path=lambda: _ss_path_ref,
+                get_screenshot_path=lambda: _snap_mod._last_saved_screenshot_path,
             )
             await tool_logger.start()
 
@@ -542,7 +542,7 @@ def _cmd_vision(args: argparse.Namespace) -> int:
 
     from harness.verification.config import load_vision_env
     from harness.config import Config
-    from harness.verification.capturer import capture, capture_from_file
+    from harness.verification.capturer import capture_screenshot, capture_from_file
     from harness.verification.vision_agent import VisionSubAgent
 
     # 校验参数
@@ -572,7 +572,7 @@ def _cmd_vision(args: argparse.Namespace) -> int:
                 # 预加载工具集——延迟加载模式下，工具集未加载前截图工具不可用
                 tool_count = await client.preload_all_toolsets()
                 print(f"已加载 {tool_count} 个工具，正在截图...")
-                screenshot = await capture(
+                screenshot = await capture_screenshot(
                     client,
                     config.vision_max_size[0],
                     config.vision_max_size[1],

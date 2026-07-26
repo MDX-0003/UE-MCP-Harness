@@ -30,7 +30,7 @@ logger = logging.getLogger("harness.verification.capturer")
 
 # 截图专用持久 session + 串行锁
 # init_shot_session() 在 Harness 启动时调用一次；
-# 所有 capture() 调用复用同一 session；
+# 所有 capture_screenshot() 调用复用同一 session；
 # close_shot_session() 在 Harness 关闭时调用。
 _shot_client: "McpClientSession | None" = None
 _shot_lock = asyncio.Lock()
@@ -92,7 +92,7 @@ class Screenshot:
     height: int = 0
 
 
-async def capture(
+async def capture_screenshot(
     ue_client: McpClientSession,
     max_width: int = 1024,
     max_height: int = 768,

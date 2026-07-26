@@ -30,7 +30,7 @@ from mcp.types import (
 
 from harness.client import McpClientSession, mcp_extract_text, mcp_parse_result
 from harness.config import Config
-from harness.context.filter import apply_filter
+from harness.context.filter import ctx_filter_tools
 from harness.context.prompt import (
     SystemContextProvider,
     TaskContextProvider,
@@ -289,10 +289,10 @@ def build_server(
         # 应用过滤（自由探索模式或 Skill 模式）
         if skill_ref and skill_ref[0]:
             extra = frozenset(skill_ref[0].get("tools_allowlist", []))
-            return apply_filter(_cached_raw_tools, config.default_tools_allowlist,
+            return ctx_filter_tools(_cached_raw_tools, config.default_tools_allowlist,
                                 extra_allowed=extra, denylist=config.default_tools_denylist)
         else:
-            return apply_filter(_cached_raw_tools, config.default_tools_allowlist,
+            return ctx_filter_tools(_cached_raw_tools, config.default_tools_allowlist,
                                 denylist=config.default_tools_denylist)
 
     # ---- tools/list ----

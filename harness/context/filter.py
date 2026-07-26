@@ -14,7 +14,7 @@ ESCAPE_HATCH_TOOLS = frozenset({
 })
 
 
-def apply_filter(
+def ctx_filter_tools(
     raw_tools: list[dict],
     allowlist: tuple[str, ...],
     *,

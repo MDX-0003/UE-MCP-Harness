@@ -314,7 +314,7 @@ async def handle_match_reference(ctx: ToolContext, arguments: dict) -> CallToolR
 
     # 2. Capture current viewport
     try:
-        from harness.verification.capturer import capture as capturer_capture
+        from harness.verification.capturer import capture_screenshot as capturer_capture
         max_w, max_h = ctx.config.vision_max_size
         screenshot = await capturer_capture(
             ctx.ue_client, max_w, max_h, mode="viewport",

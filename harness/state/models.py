@@ -16,13 +16,6 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-class Vector3(BaseModel):
-    """三维向量。"""
-    x: float = 0.0
-    y: float = 0.0
-    z: float = 0.0
-
-
 class ActorSnapshot(BaseModel):
     """单个 Actor 的缓存快照。"""
     name: str

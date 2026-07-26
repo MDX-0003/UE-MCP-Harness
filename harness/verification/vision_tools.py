@@ -15,7 +15,7 @@ from harness.tools import (
     tool_ok, tool_fail, require_vision_manager, VISION_BADGES,
 )
 from harness.interceptor import ToolCallCompleted
-from harness.verification.capturer import capture as _capture_screenshot
+from harness.verification.capturer import capture_screenshot as _capture_screenshot
 from harness.verification.debug import log_exception as _log_exception
 
 
