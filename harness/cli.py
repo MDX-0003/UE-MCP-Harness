@@ -80,6 +80,70 @@ async def _verify_level_persistence_tools(ue_client) -> list[str]:
     return missing
 
 
+def _build_instructions(skill_registry: "SkillRegistry") -> str:
+    """组装 LLM 系统 instructions：标准验证流程 + 灯光 SOP + Skill 列表。"""
+    skills = skill_registry.list_skills()
+    if skills:
+        lines: list[str] = ["可用 Skill（用户提及触发词时自动激活对应 Skill）："]
+        for s in skills:
+            lines.append(f"  - {s.name}: {s.description}")
+            triggers_str = ", ".join(s.triggers)
+            lines.append(f"    触发词: {triggers_str}")
+        skill_list = "\n".join(lines)
+    else:
+        skill_list = "  (无已安装 Skill)"
+
+    return (
+        "你是 UE Editor Agent，通过 Harness 中间层连接 Unreal Engine 5.8。\n"
+        "自由探索模式下可用约 20 个核心工具。\n"
+        "\n"
+        "## 场景修改后的标准验证流程\n"
+        "修改任何 Actor 后，请按以下步骤验证效果：\n"
+        "1. L2 读回 — 调 get_actor_transform / get_properties 确认写入值\n"
+        "2. 相机定位 — 截图前确保视口对准了观察目标：\n"
+        "   FocusOnActors 只能调距离，不改变旋转。如果 Actor 被遮挡或视角太偏，\n"
+        "   先用以下预设角度轮换尝试：\n"
+        "     pitch=-25, yaw=45  →  经典斜前侧（推荐首选）\n"
+        "     pitch=-20, yaw=90  →  纯侧面\n"
+        "     pitch=-55, yaw=0   →  俯瞰（适合检查位置关系）\n"
+        "     pitch=-15, yaw=0   →  正面平视\n"
+        "   每次：SetCameraTransform(rotation=(pitch, yaw)) → FocusOnActors()\n"
+        "   试一个角度截一次图，确认目标可见后再做正式的 vision_screenshot 验证。\n"
+        "3. 视觉验证 — 调 vision_screenshot(question=\"具体要验证什么？\")\n"
+        "   系统会自动注入场景中的相关 Actor 信息和最近操作记录。\n"
+        "4. 追问 — 如需要，调 vision_ask 在同一 Session 内深入分析\n"
+        "5. 闭环 — 验证通过后调 vision_reset 关闭 Session\n"
+        "\n"
+        "## ⚠ 灯光修改专项 SOP（必须遵守）\n"
+        "修改灯光属性（颜色/强度/旋转）前，必须先完成空间检查。\n"
+        "灯光的视觉效果需要在被照亮的表面上判断，不能看编辑器图标/gizmo 颜色。\n"
+        "\n"
+        "前置检查步骤：\n"
+        "a. 确认灯光附近有可见几何体：\n"
+        "   调 get_actor_transform 获取灯光位置，\n"
+        "   调 get_actor_transform 获取场景中 StaticMeshActor 的位置，\n"
+        "   计算距离：PointLight/SpotLight 默认有效半径约 1000 UE 单位，\n"
+        "   RectLight 约 2000 单位。如果所有几何体距离都超过有效半径，\n"
+        "   先调 set_actor_transform 把灯移到目标物体附近。\n"
+        "b. 确认灯光朝向目标：\n"
+        "   SpotLight：调 rotation 使光锥对准目标物体。\n"
+        "   可从相机对准目标物体来判断——不会被自身遮挡的视角 = 灯光应该来的方向。\n"
+        "c. 确认后再改属性：\n"
+        "   上面两步全部确认后，再调 set_properties 改 LightColor/Intensity。\n"
+        "d. 验证时关注被照亮的表面，不是图标：\n"
+        "   vision_screenshot 的问题要包含\"被照亮的表面呈现什么颜色\"，\n"
+        "   不要问\"图标是否可见\"或\"图标是什么颜色\"。\n"
+        "\n"
+        "⚠ 如果 Vision 返回\"场景为空\"、\"无被照表面\"、\"无法观察光照效果\"：\n"
+        "→ 不要继续调整灯光属性！回到前置检查步骤 a，先把灯移到几何体附近。\n"
+        "\n"
+        f"{skill_list}\n"
+        "调 activate_skill <名称> 激活 Skill（如 activate_skill(\"验证\") 进入完整验证引导），"
+        "调 deactivate_skill 退出。\n"
+        "调 get_context 获取最新 UE 状态快照和活跃 Skill 进度。"
+    )
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     """启动 Harness MCP Server，连接 UE MCP Server。
 
@@ -276,65 +340,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             # 初始化 instructions：列出可用 Skill（含触发词，供 LLM 匹配用户意图）
             skill_registry = SkillRegistry(skills_dir=_SKILLS_PATH)
             skill_registry.load_skills()
-            skills = skill_registry.list_skills()
-            if skills:
-                lines: list[str] = ["可用 Skill（用户提及触发词时自动激活对应 Skill）："]
-                for s in skills:
-                    lines.append(f"  - {s.name}: {s.description}")
-                    triggers_str = ", ".join(s.triggers)
-                    lines.append(f"    触发词: {triggers_str}")
-                skill_list = "\n".join(lines)
-            else:
-                skill_list = "  (无已安装 Skill)"
-            instructions = (
-                "你是 UE Editor Agent，通过 Harness 中间层连接 Unreal Engine 5.8。\n"
-                "自由探索模式下可用约 20 个核心工具。\n"
-                "\n"
-                "## 场景修改后的标准验证流程\n"
-                "修改任何 Actor 后，请按以下步骤验证效果：\n"
-                "1. L2 读回 — 调 get_actor_transform / get_properties 确认写入值\n"
-                "2. 相机定位 — 截图前确保视口对准了观察目标：\n"
-                "   FocusOnActors 只能调距离，不改变旋转。如果 Actor 被遮挡或视角太偏，\n"
-                "   先用以下预设角度轮换尝试：\n"
-                "     pitch=-25, yaw=45  →  经典斜前侧（推荐首选）\n"
-                "     pitch=-20, yaw=90  →  纯侧面\n"
-                "     pitch=-55, yaw=0   →  俯瞰（适合检查位置关系）\n"
-                "     pitch=-15, yaw=0   →  正面平视\n"
-                "   每次：SetCameraTransform(rotation=(pitch, yaw)) → FocusOnActors()\n"
-                "   试一个角度截一次图，确认目标可见后再做正式的 vision_screenshot 验证。\n"
-                "3. 视觉验证 — 调 vision_screenshot(question=\"具体要验证什么？\")\n"
-                "   系统会自动注入场景中的相关 Actor 信息和最近操作记录。\n"
-                "4. 追问 — 如需要，调 vision_ask 在同一 Session 内深入分析\n"
-                "5. 闭环 — 验证通过后调 vision_reset 关闭 Session\n"
-                "\n"
-                "## ⚠ 灯光修改专项 SOP（必须遵守）\n"
-                "修改灯光属性（颜色/强度/旋转）前，必须先完成空间检查。\n"
-                "灯光的视觉效果需要在被照亮的表面上判断，不能看编辑器图标/gizmo 颜色。\n"
-                "\n"
-                "前置检查步骤：\n"
-                "a. 确认灯光附近有可见几何体：\n"
-                "   调 get_actor_transform 获取灯光位置，\n"
-                "   调 get_actor_transform 获取场景中 StaticMeshActor 的位置，\n"
-                "   计算距离：PointLight/SpotLight 默认有效半径约 1000 UE 单位，\n"
-                "   RectLight 约 2000 单位。如果所有几何体距离都超过有效半径，\n"
-                "   先调 set_actor_transform 把灯移到目标物体附近。\n"
-                "b. 确认灯光朝向目标：\n"
-                "   SpotLight：调 rotation 使光锥对准目标物体。\n"
-                "   可从相机对准目标物体来判断——不会被自身遮挡的视角 = 灯光应该来的方向。\n"
-                "c. 确认后再改属性：\n"
-                "   上面两步全部确认后，再调 set_properties 改 LightColor/Intensity。\n"
-                "d. 验证时关注被照亮的表面，不是图标：\n"
-                "   vision_screenshot 的问题要包含\"被照亮的表面呈现什么颜色\"，\n"
-                "   不要问\"图标是否可见\"或\"图标是什么颜色\"。\n"
-                "\n"
-                "⚠ 如果 Vision 返回\"场景为空\"、\"无被照表面\"、\"无法观察光照效果\"：\n"
-                "→ 不要继续调整灯光属性！回到前置检查步骤 a，先把灯移到几何体附近。\n"
-                "\n"
-                f"{skill_list}\n"
-                "调 activate_skill <名称> 激活 Skill（如 activate_skill(\"验证\") 进入完整验证引导），"
-                "调 deactivate_skill 退出。\n"
-                "调 get_context 获取最新 UE 状态快照和活跃 Skill 进度。"
-            )
+            instructions = _build_instructions(skill_registry)
             server.instructions = instructions
             # 将 instructions 写入 session 目录，供复盘分析
             if tool_logger is not None and tool_logger.session_dir is not None:

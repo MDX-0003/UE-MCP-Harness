@@ -8,7 +8,7 @@
 
 **上下文组装（Context Assembly）：** Harness 在每个 LLM 轮次前构建 prompt 的过程。三层：System（身份 + State Cache 快照）、Task（Skill 步骤 + 记忆）、Tool Reference（延迟加载的 UE 工具文档）。
 
-**State Cache（状态缓存）：** Harness 对 UE 编辑器世界状态的内存快照。采用 Write-Through 策略——通过拦截 write tool call 参数即时更新。包含：当前地图、Actor 列表、选中状态、PIE 状态。Hard Boundary 事件（地图切换、重连）时全量刷新。
+**State Cache（状态缓存）：** Harness 对 UE 编辑器世界状态的带指纹校验的观测记录（ADR 0008）。UE 编辑器是唯一权威源——WorldState 从"权威镜像"降级为带 provenance 的观测，每条快照携带时间戳与关卡指纹校验结果。采用 Write-Through 策略——通过拦截 write tool call 参数即时更新。Hard Boundary 事件时触发指纹比对：匹配则信任既有观测，失配则降级为历史记录并告知 LLM。
 
 **Write-Through Cache（写穿透缓存）：** State Cache 的核心策略。Harness 拦截所有 tool call，对每个写操作（`set_actor_transform`、`set_properties`、`add_to_scene_*`、`remove_from_scene`）在转发给 UE 前从参数中提取变更语义，即时更新本地缓存。无需额外的轮询 MCP 调用。
 
@@ -16,7 +16,7 @@
 
 **Vision Sub-Agent（视觉子代理）：** 独立于主 Agent 的 Vision 模型实例。拥有独立的上下文窗口和状态。接收截图 + 预期描述，返回 `{pass, reason, adjustment}`。可向主 Agent 追问额外信息。同一任务内保持状态（追踪渐变改进）。
 
-**Task Memory（任务记忆）：** 结构化 JSON 表示任务完成进度。替代长任务（>20 tool call）的原始对话历史。关键字段：task_id、description、completed[]、pending[]、current_step、errors[]。
+**Task Memory / 轨迹记忆（Trajectory Memory）：** 记录任务意图、已完成/待完成步骤、错误、关键资产引用——这些是只有 Harness 知道、UE 侧不存在的信息，不因 Harness 外改动而失真（ADR 0008）。替代长任务（>20 tool call）的原始对话历史。原 Issue 009 已并入本 ADR，原磁盘持久化方案（Issue 013）已作废。
 
 **Observability（可观测性）：** 每个 tool call 的结构化日志（request/response/duration/screenshot/verification）。支持调试回放。
 

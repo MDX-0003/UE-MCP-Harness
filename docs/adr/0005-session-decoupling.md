@@ -23,6 +23,6 @@
 - 当新 MCP 连接到达时，Harness 通过 `Mcp-Session-Id` 关联到现有 Agent Session（如果有的话），或者创建新的
 
 **后果：**
-- Harness 需要在 MCP 连接断开时保存 Agent Session 状态到磁盘
+- ~~Harness 需要在 MCP 连接断开时保存 Agent Session 状态到磁盘~~ **→ 已由 ADR 0008 推翻。** 磁盘持久化（Issue 013）于 2026-07-07 作废——UE 编辑器瞬时快照比持久化有意义，磁盘文件可能落后于 UE 实际状态。
 - Skill 执行状态（当前步骤、已完成步骤）存储在 Agent Session 中，不存储在 MCP Session 中
-- 如果 Harness 自身进程崩溃，Agent Session 从最后的持久化快照恢复（最终一致性）
+- ~~如果 Harness 自身进程崩溃，Agent Session 从最后的持久化快照恢复（最终一致性）~~ **→ 同上，已作废。**

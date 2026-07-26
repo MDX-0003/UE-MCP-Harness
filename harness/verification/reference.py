@@ -296,7 +296,7 @@ async def handle_match_reference(ctx: ToolContext, arguments: dict) -> CallToolR
 
     # Phase 3: hard-stop check (countdown zero or max-rounds fallback)
     stop_reason = session.check_stop()
-    if stop_reason is not None and ctx.stop_limit is not None:
+    if stop_reason is not None:
         best_path = session.best_snapshot_path
         summary = ref_build_stop_summary(session, best_path, stop_reason)
         log_local_call(ctx, "match_reference", arguments, summary, t0)

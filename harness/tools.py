@@ -38,13 +38,9 @@ class ToolContext:
     snapshot_recorder: Any | None
     pending_screenshot_ref: list[Any] | None       # [Screenshot | None]
     vision_session_manager: Any | None             # VisionSessionManager | None
-    stop_limit: Any | None                         # StopLimitInterceptor | None
     post_interceptors: list[ToolCallInterceptor] = field(default_factory=list)
     tool_logger: Any | None = None                 # ToolCallLogger 直接引用
-    # Issue 020: 以下字段将替换为 ReferenceImageSession
-    ref_session: dict[str, Any] = field(default_factory=dict)   # 原 _session_reference
-    ref_is_first_load: bool = False
-    ref_mapping_generated: bool = False
+    ref_session: Any | None = None                 # ReferenceImageSession | None (Issue 019/020 落地)
 
 
 # ---- 自有工具注册表项 ----

@@ -439,64 +439,61 @@ class TaskMemory(BaseModel):
 
 ## 4. 项目目录结构
 
+> 最后更新：2026-07-26（重构后）
+
 ```
 ue-agent-harness/
 ├── harness/
-│   ├── __init__.py
-│   ├── server.py           # MCP Server（面向 LLM, mcp SDK）
-│   ├── client.py           # MCP Client（面向 UE, JSON-RPC 2.0 + SSE 解析）
-│   ├── config.py           # 配置管理
-│   ├── cli.py              # CLI 入口
+│   ├── cli.py              # CLI 入口 + 拦截器链注册 + _build_instructions
+│   ├── server.py           # MCP Server（面向 LLM, 407 行, 注册表分发, build_server）
+│   ├── client.py           # MCP Client（面向 UE, JSON-RPC 2.0 + SSE 解析, McpClientSession）
+│   ├── config.py           # Config dataclass + from_env + merge_cli_overrides
+│   ├── transport.py        # MCP SSE transport (create_app + serve)
+│   ├── interceptor.py      # ToolCallInterceptor 基类 + ToolCallCompleted
+│   ├── tools.py            # HarnessTool + ToolContext + tool_ok/tool_fail
 │   ├── context/
-│   │   ├── __init__.py
-│   │   ├── filter.py       # 工具过滤
-│   │   ├── prompt.py       # 三层 Prompt 组装
-│   │   └── skill_registry.py # Skill CRUD（YAML 文件管理）
+│   │   ├── filter.py       # 工具过滤 (ctx_filter_tools, ctx_is_escape_hatch)
+│   │   ├── prompt.py       # 三层 Prompt 组装 (assemble_system_prompt + ContextProvider)
+│   │   ├── provider.py     # Context Provider 接口
+│   │   ├── skill_registry.py # Skill CRUD（YAML 文件管理）
+│   │   └── skill_tools.py  # activate_skill/save_skill/deactivate_skill/get_context handler
 │   ├── verification/
-│   │   ├── __init__.py
-│   │   ├── capturer.py     # 截图获取
-│   │   ├── vision_agent.py # 独立 Vision Sub-Agent
-│   │   └── loop.py         # 验证循环控制器
+│   │   ├── atmosphere.py   # build_atmosphere_mapping (MiMo 氛围组件扫描)
+│   │   ├── capturer.py     # 截图获取 (capture_screenshot + Screenshot)
+│   │   ├── config.py       # Vision 配置 (.vision.env 加载, load_vision_env)
+│   │   ├── debug.py        # Vision 调试开关
+│   │   ├── drift_alert.py  # DriftAlertInterceptor (漂移时注入警告)
+│   │   ├── interceptor.py  # VisionInterceptor + ReadbackInterceptor + is_screenshot_tool
+│   │   ├── metrics.py      # compute_match_metrics (直方图/SSIM/R-B ratio)
+│   │   ├── reference.py    # match_reference handler + ReferenceImageSession
+│   │   ├── session.py      # VisionSessionManager + record_write + build_full_prompt_context
+│   │   ├── vision_agent.py # VisionSubAgent (独立 LLM API) + VisionVerdict
+│   │   └── vision_tools.py # vision_screenshot/ask/tell/reset/status handler
 │   ├── state/
-│   │   ├── __init__.py
-│   │   ├── cache.py        # pydantic 状态模型 + write-through 更新
-│   │   ├── interceptor.py  # Tool call 拦截 → 识别写操作 → 更新缓存
-│   │   └── refresher.py    # Hard Boundary 事件全量刷新
-│   ├── memory/
-│   │   ├── __init__.py
-│   │   ├── compressor.py   # 任务记忆压缩
-│   │   └── injector.py     # Context 注入
-│   ├── recovery/
-│   │   ├── __init__.py
-│   │   ├── classifier.py   # 错误分类器
-│   │   ├── retry.py        # 重试策略
-│   │   └── handler.py      # 恢复处理器
-│   ├── safety/
-│   │   ├── __init__.py
-│   │   ├── rules.py        # 规则引擎
-│   │   ├── preflight.py    # 预检钩子
-│   │   └── defaults.py     # 默认规则
-│   └── observability/
-│       ├── __init__.py
-│       ├── logger.py        # 请求/响应日志
-│       ├── replay.py        # 日志回放
-│       └── stats.py         # 统计面板
-├── skills/                  # 内置 Skill 示例（随 Harness 分发）
-│   └── evening-lighting.yaml
-├── tests/
-│   ├── test_client.py
-│   ├── test_context.py
-│   └── ...
+│   │   ├── models.py       # WorldState + ActorSnapshot pydantic 模型
+│   │   ├── interceptor.py  # StateCacheInterceptor (on_write 回调注入, L1 写穿透)
+│   │   ├── refresher.py    # state_full_refresh (L3 全量刷新)
+│   │   ├── hard_boundary.py # execute_hard_boundary (指纹校验 + dirty-diff)
+│   │   └── normalize.py    # normalize_tool_args + state_parse_ref_path + mcp_tool_short_name
+│   ├── observability/
+│   │   ├── logger.py       # JSONL ToolCallLogger
+│   │   ├── replay.py       # 回放引擎
+│   │   ├── snapshotter.py  # SnapshotRecorder (截图+上下文归档)
+│   │   └── stats.py        # 统计面板
+│   ├── safety/             # 011 安全护栏（待实现）
+│   └── memory/             # 空目录（009 任务记忆已作废，见 ADR 0008）
+├── skills/                 # 内置 Skill 示例
+├── tests/                  # 384 passed + 4 skipped (2026-07-26)
 ├── pyproject.toml
 ├── README.md
 └── docs/
-    └── adr/
-        ├── 0001-harness-topology.md
-        ├── 0002-skill-boundary.md
-        ├── 0003-context-assembly.md
-        ├── 0004-write-through-cache.md
-        ├── 0005-session-decoupling.md
-        └── 0006-vision-sub-agent.md
+    ├── architecture.md     # 本文档
+    ├── CONTEXT.md          # 领域语言词汇表
+    ├── contracts.md        # 接口契约
+    ├── adr/                # 架构决策记录 (0001-0008)
+    ├── issues/             # 开发 Issue
+    ├── plans/              # 实施计划
+    └── handoff/            # 交接文档
 ```
 
 ---

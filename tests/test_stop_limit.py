@@ -69,10 +69,10 @@ def _setup_capturer_mock(monkeypatch):
     async def _fake_capture(*args, **kwargs):
         return MagicMock(data_b64=fake_b64, width=10, height=10)
 
-    monkeypatch.setattr(capturer_mod, "capture", _fake_capture)
+    monkeypatch.setattr(capturer_mod, "capture_screenshot", _fake_capture)
 
 
-def _build_server_and_call(ue_client, stop_limit, tmp_path):
+def _build_server_and_call(ue_client, tmp_path):
     """构建 server 并返回 call_match 辅助函数。
 
     Note: Issue 019 removed stop_limit from build_server.
@@ -121,9 +121,8 @@ class TestCountdown:
     async def test_countdown_activates_at_hist_70(self, tmp_path: Path, monkeypatch):
         """hist≥0.70 首次达成 → 输出含倒计时提示。"""
         ue_client = AsyncMock()
-        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
-        call = _build_server_and_call(ue_client, sl, tmp_path)
+        call = _build_server_and_call(ue_client, tmp_path)
 
         with patch(
             "harness.verification.vision_agent.VisionSubAgent.compare_with_reference",
@@ -143,9 +142,8 @@ class TestCountdown:
     async def test_countdown_hard_stop_after_3_rounds(self, tmp_path: Path, monkeypatch):
         """倒计时激活后 R1-R4 通过，R5 被硬拦截。"""
         ue_client = AsyncMock()
-        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
-        call = _build_server_and_call(ue_client, sl, tmp_path)
+        call = _build_server_and_call(ue_client, tmp_path)
 
         with patch(
             "harness.verification.vision_agent.VisionSubAgent.compare_with_reference",
@@ -172,9 +170,8 @@ class TestCountdown:
     async def test_r1_achieve_70_max_4_rounds(self, tmp_path: Path, monkeypatch):
         """R1 达成 0.75 → R1-R4 通过，R5 被拦截。"""
         ue_client = AsyncMock()
-        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
-        call = _build_server_and_call(ue_client, sl, tmp_path)
+        call = _build_server_and_call(ue_client, tmp_path)
 
         with patch(
             "harness.verification.vision_agent.VisionSubAgent.compare_with_reference",
@@ -206,9 +203,8 @@ class TestFallback10Rounds:
     async def test_no_countdown_10_round_fallback(self, tmp_path: Path, monkeypatch):
         """hist 始终 < 0.70 → 10 轮通过，11 轮被拦截。"""
         ue_client = AsyncMock()
-        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
-        call = _build_server_and_call(ue_client, sl, tmp_path)
+        call = _build_server_and_call(ue_client, tmp_path)
 
         with patch(
             "harness.verification.vision_agent.VisionSubAgent.compare_with_reference",
@@ -238,9 +234,8 @@ class TestSaveLevelAsOnce:
     async def test_save_only_on_first_cross_70(self, tmp_path: Path, monkeypatch):
         """hist R1=0.65(<0.70) → R2=0.72(首次触发保存) → R3=0.80(不再保存)。"""
         ue_client = AsyncMock()
-        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
-        call = _build_server_and_call(ue_client, sl, tmp_path)
+        call = _build_server_and_call(ue_client, tmp_path)
 
         metrics_sequence = [
             _fake_metrics(hist=0.65),  # R1: 未触发
@@ -351,9 +346,8 @@ class TestOutputContent:
     async def test_round_display_shows_countdown(self, tmp_path: Path, monkeypatch):
         """倒计时激活后输出含"最多 N 轮"和倒计时提示。"""
         ue_client = AsyncMock()
-        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
-        call = _build_server_and_call(ue_client, sl, tmp_path)
+        call = _build_server_and_call(ue_client, tmp_path)
 
         with patch(
             "harness.verification.vision_agent.VisionSubAgent.compare_with_reference",
@@ -372,9 +366,8 @@ class TestOutputContent:
     async def test_snapshot_message_mentions_editor_state(self, tmp_path: Path, monkeypatch):
         """快照消息应告知编辑器仍在原关卡。"""
         ue_client = AsyncMock()
-        sl = ReferenceImageSession()
         _setup_capturer_mock(monkeypatch)
-        call = _build_server_and_call(ue_client, sl, tmp_path)
+        call = _build_server_and_call(ue_client, tmp_path)
 
         with patch(
             "harness.verification.vision_agent.VisionSubAgent.compare_with_reference",

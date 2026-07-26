@@ -21,18 +21,18 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 | 013 | State Cache 磁盘持久化 | ⬜ 作废 (ADR 0008，文件已删) | — |
 | 014 | 闭环验收场景 demo | ⬜ 降级 (2026-07-07)，已删除 | — |
 | 015 | Vision 定向提问 (Session 化 vision_ask) | ✅ | docs/issues/015-vision-targeted-questioning.md |
-| 016 | L2 读回拦截器 + 参考图对比 | ❌ **当前里程碑** | docs/issues/016-readback-and-reference-image.md |
-| 017 | MCP 协议层公共化：结果解包 + 帧构造 | ❌ | docs/issues/017-mcp-result-unwrapping.md |
-| 018 | call_tool 注册表化：HarnessTool 分发替代 if 链 | ❌ | docs/issues/018-call-tool-registry.md |
-| 019 | match_reference 状态类化 + atmosphere 提取 | ❌ | docs/issues/019-reference-session-extract.md |
-| 020 | 命名规整：前缀+功能全面对齐 | ❌ | docs/issues/020-naming-convention-alignment.md |
-| 021 | 周边修复：Bug 修复 + 死代码清理 + CLI/Config | ❌ | docs/issues/021-bug-fixes-and-cleanup.md |
-| 022 | 文档同步：架构/契约/词汇表回标 | ❌ | docs/issues/022-documentation-sync.md |
+| 016 | L2 读回拦截器 + 参考图对比 | ✅ | docs/issues/016-readback-and-reference-image.md |
+| 017 | MCP 协议层公共化：结果解包 + 帧构造 | ✅ | docs/issues/017-mcp-result-unwrapping.md |
+| 018 | call_tool 注册表化：HarnessTool 分发替代 if 链 | ✅ | docs/issues/018-call-tool-registry.md |
+| 019 | match_reference 状态类化 + atmosphere 提取 | ✅ (commit 9b8bb24) | docs/issues/019-reference-session-extract.md |
+| 020 | 命名规整：前缀+功能全面对齐 | ✅ (commit 9b8bb24) | docs/issues/020-naming-convention-alignment.md |
+| 021 | 周边修复：Bug 修复 + 死代码清理 + CLI/Config | ✅ (commit 9b8bb24) | docs/issues/021-bug-fixes-and-cleanup.md |
+| 022 | 文档同步：架构/契约/词汇表回标 | ❌ 进行中 | docs/issues/022-documentation-sync.md |
 | — | LevelPersistenceToolset (fingerprint/dirty/save 五工具) | ✅ 直连验证通过 | UE 侧插件, `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset/`, 详见 docs/contracts.md §4 |
 
-**全量测试：331 passed + 4 skipped（2026-07-24，重构前基线）**
+**全量测试：384 passed + 4 skipped（2026-07-26，重构后基线）。12 个预存失败（test_stop_limit 8 + test_build_atmosphere_mapping 4）待下一轮修复。**
 
-**当前方向（2026-07-14 更新）**：Issue 016 已完整交付——Part A L2 读回（ReadbackInterceptor，写后自动读回 diff）、Part B 参考图匹配（build_atmosphere_mapping + match_reference + match-atmosphere Skill）、PLAN_0714 v3 倒计时停止机制（hist≥0.70 激活 3 轮倒计时，10 轮兜底）。下一里程碑待定（候选：011 安全护栏 / 014 demo / 收敛效率优化）。项目第一定位是求职/作品集叙事。UE 是世界状态唯一权威，WorldState 为带指纹校验的观测记录（ADR 0008）。UE 侧配套插件 LevelPersistenceToolset（七工具）位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset`，已直连验证通过。
+**当前方向（2026-07-26 更新）**：重构计划（`docs/plans/2026-07-24-harness-refactor.md`）Issues 017–021 已全部完成——server.py 从 ~1763 行缩减到 407 行（-77%），call_tool if 链消除，Import 环断开，命名规整，B2/B7 静默失效修复，`_is_screenshot_tool` 收敛。剩余：文档回标（Issue 022）+ 12 个预存测试修复。项目第一定位是求职/作品集叙事。UE 是世界状态唯一权威，WorldState 为带指纹校验的观测记录（ADR 0008）。UE 侧配套插件 LevelPersistenceToolset（七工具）位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset`，已直连验证通过。
 
 ## 架构
 
@@ -93,34 +93,46 @@ uv run harness replay <session_id>
 
 ```
 harness/
-├── cli.py              # CLI 入口 + 拦截器链注册
-├── server.py           # MCP Server（面向 LLM）
+├── cli.py              # CLI 入口 + 拦截器链注册 + _build_instructions
+├── server.py           # MCP Server（面向 LLM, 407 行, 注册表分发）
 ├── client.py           # MCP Client（面向 UE, SSE 解析）
-├── config.py           # Config dataclass
+├── config.py           # Config dataclass + merge_cli_overrides
 ├── interceptor.py      # ToolCallInterceptor 基类 + ToolCallCompleted
+├── tools.py            # HarnessTool + ToolContext + tool_ok/tool_fail
 ├── context/
-│   ├── filter.py       # 工具过滤
-│   ├── prompt.py       # 三层 Prompt 组装
+│   ├── filter.py       # 工具过滤 (ctx_filter_tools)
+│   ├── prompt.py       # 三层 Prompt 组装 (assemble_system_prompt)
 │   ├── provider.py     # Context Provider 接口
-│   └── skill_registry.py  # Skill CRUD
+│   ├── skill_registry.py  # Skill CRUD
+│   └── skill_tools.py  # activate/save/deactivate/get_context handler
 ├── verification/
-│   ├── capturer.py     # 截图获取
-│   ├── vision_agent.py # Vision Sub-Agent (独立 LLM API)
-│   └── config.py       # Vision 配置 (.vision.env)
+│   ├── atmosphere.py   # build_atmosphere_mapping (MiMo 氛围组件扫描)
+│   ├── capturer.py     # 截图获取 (capture_screenshot)
+│   ├── config.py       # Vision 配置 (.vision.env 加载)
+│   ├── debug.py        # Vision 调试开关
+│   ├── drift_alert.py  # DriftAlertInterceptor (漂移警告注入)
+│   ├── interceptor.py  # VisionInterceptor + ReadbackInterceptor + is_screenshot_tool
+│   ├── metrics.py      # compute_match_metrics (直方图/SSIM/R-B ratio)
+│   ├── reference.py    # match_reference handler + ReferenceImageSession
+│   ├── session.py      # VisionSessionManager + record_write + 上下文组装
+│   ├── vision_agent.py # VisionSubAgent (独立 LLM API) + VisionVerdict
+│   └── vision_tools.py # vision_screenshot/ask/tell/reset/status handler
 ├── state/
-│   ├── models.py       # WorldState pydantic 模型
-│   ├── interceptor.py  # StateCacheInterceptor (post_call 更新缓存)
-│   └── refresher.py    # L3 全量刷新
-├── memory/             # 009 任务记忆（待实现）
+│   ├── models.py       # WorldState + ActorSnapshot pydantic 模型
+│   ├── interceptor.py  # StateCacheInterceptor (post_call 更新缓存, on_write 回调)
+│   ├── refresher.py    # L3 全量刷新 (state_full_refresh)
+│   ├── hard_boundary.py # execute_hard_boundary (指纹校验 + dirty-diff)
+│   └── normalize.py    # normalize_tool_args + state_parse_ref_path + mcp_tool_short_name
+├── memory/             # 009 任务记忆（已作废）
 ├── observability/
 │   ├── logger.py       # JSONL ToolCallLogger
 │   ├── replay.py       # 回放引擎
-│   └── stats.py        # 统计面板
+│   ├── snapshotter.py  # SnapshotRecorder (截图+上下文归档)
+│   └── stats.py        # 统计面板 (harness stats)
 ├── safety/             # 011 安全护栏（待实现）
-├── recovery/           # 010 错误恢复（跳过）
-└── stop_limit.py       # PLAN_0714 v3 match_reference 倒计时停止机制
+└── transport.py        # MCP SSE transport (create_app + serve)
 skills/                 # 内置 Skill 示例
-tests/                  # 16 个测试文件, 398 tests
+tests/                  # 测试文件, 384 passed + 4 skipped
 docs/
 ├── architecture.md     # 完整架构文档
 ├── CONTEXT.md          # 领域语言词汇表
