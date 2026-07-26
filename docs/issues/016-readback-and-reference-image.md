@@ -1,6 +1,6 @@
 # 016 — L2 读回验证 (ReadbackInterceptor) + 参考图对比
 
-**状态：** 当前里程碑（2026-07-07 立项），2026-07-08 完成 UE 源码级 grill 审查
+**状态：** ✅ 已完成（2026-07-14 交付：Part A ReadbackInterceptor + Part B 参考图匹配 + PLAN_0714 v3 倒计时停止机制）
 **依赖关系：** Part B 依赖 Part A —— 参考图循环的"逐步执行"阶段需要廉价、确定性的每步验证器，否则每步都要烧一次 Vision API。
 
 ## 动机

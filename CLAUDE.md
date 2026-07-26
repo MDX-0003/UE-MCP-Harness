@@ -2,7 +2,7 @@
 
 MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外是 MCP Server（LLM 连接入口），对内是 MCP Client（连接 UE MCP Server）。提供上下文组装、状态缓存（带指纹校验的观测记录）、验证闭环（L2 读回 + Vision）、轨迹记忆、安全护栏。
 
-## 当前状态 (2026-07-07)
+## 当前状态 (2026-07-14)
 
 | Issue | 模块 | 状态 |
 |:---:|------|:---:|
@@ -32,7 +32,7 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 
 **全量测试：331 passed + 4 skipped（2026-07-24，重构前基线）**
 
-**当前方向（2026-07-07 更新）**：项目第一定位是求职/作品集叙事，重心转向参考图机制——用参考图让 Vision 回答“参考图与现状的区别”，由主 LLM 拆解为可执行步骤，替代口头表述的不确定性（Issue 016 Part B）。其前置是 L2 读回验证（ReadbackInterceptor，写后自动读回 diff，ADR 0008 定义的正确性主通道，Issue 016 Part A）。原 Issue 014 demo 降级为素材性工作，若将来录制，数字对比基准为有/无 Harness 对照。UE 是世界状态唯一权威，WorldState 为带指纹校验的观测记录（ADR 0008）。UE 侧配套插件 LevelPersistenceToolset（fingerprint/dirty/save 五工具）位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset`，已直连验证通过。
+**当前方向（2026-07-14 更新）**：Issue 016 已完整交付——Part A L2 读回（ReadbackInterceptor，写后自动读回 diff）、Part B 参考图匹配（build_atmosphere_mapping + match_reference + match-atmosphere Skill）、PLAN_0714 v3 倒计时停止机制（hist≥0.70 激活 3 轮倒计时，10 轮兜底）。下一里程碑待定（候选：011 安全护栏 / 014 demo / 收敛效率优化）。项目第一定位是求职/作品集叙事。UE 是世界状态唯一权威，WorldState 为带指纹校验的观测记录（ADR 0008）。UE 侧配套插件 LevelPersistenceToolset（七工具）位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset`，已直连验证通过。
 
 ## 架构
 
@@ -40,7 +40,7 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 LLM (Claude Code) ←→ Harness MCP Server (:9000) ←→ UE MCP Server (:8000)
                         │
               Context Assembler (三层 prompt)
-              Interceptor Chain (DebugPreCall → Readback → Logger → StateCache → DriftAlert → Vision → SnapshotRecorder)
+              Interceptor Chain (DebugPreCall → Readback → Logger → StateCache → DriftAlert → Vision → SnapshotRecorder; StopLimit 兜底 match_reference)
               State Cache (L1 write-through / L3 hard-boundary refresh)
               Skill Registry (YAML-based, ~/.ue-harness/skills/)
 ```
@@ -117,16 +117,20 @@ harness/
 │   ├── replay.py       # 回放引擎
 │   └── stats.py        # 统计面板
 ├── safety/             # 011 安全护栏（待实现）
-└── recovery/           # 010 错误恢复（跳过）
+├── recovery/           # 010 错误恢复（跳过）
+└── stop_limit.py       # PLAN_0714 v3 match_reference 倒计时停止机制
 skills/                 # 内置 Skill 示例
-tests/                  # 12 个测试文件, 252 tests
+tests/                  # 16 个测试文件, 398 tests
 docs/
 ├── architecture.md     # 完整架构文档
 ├── CONTEXT.md          # 领域语言词汇表
 ├── contracts.md        # 接口契约
 ├── adr/                # 架构决策记录 (8 个)
 ├── issues/             # 开发 Issue
-└── MVP_DEV_PLAN_0616.md  # 当前开发计划
+├── plans/              # 实施计划（PLAN_*, MVP_DEV_PLAN_*）
+├── handoff/            # 交接文档（HANDOFF_*）
+├── knowledge/          # 沉淀的技术知识
+└── tmp_issues/         # 临时问题分析（完成后归档或删除）
 ```
 
 ## Agent Skills
