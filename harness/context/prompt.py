@@ -89,9 +89,9 @@ def _render_state_snapshot(state: WorldState | None) -> str:
 
     # 缓存新鲜度
     freshness = ""
-    if state.last_full_refresh:
+    if state.last_state_full_refresh:
         from datetime import datetime, timezone
-        delta = datetime.now(timezone.utc) - state.last_full_refresh
+        delta = datetime.now(timezone.utc) - state.last_state_full_refresh
         if delta.total_seconds() < 60:
             freshness = f"（{int(delta.total_seconds())} 秒前刷新）"
         elif delta.total_seconds() < 3600:

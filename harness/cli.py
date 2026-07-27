@@ -237,14 +237,14 @@ def cmd_start(args: argparse.Namespace) -> int:
         tool_logger = None
         snapshot_recorder = None
 
+        # Issue 015: Vision Session Manager + record_write 回调
+        from harness.verification.session import VisionSessionManager, record_write
+
         # 008 缓存拦截器（无 session 依赖，可提前创建）
         cache_interceptor = StateCacheInterceptor(_cache, on_write=record_write)
 
         # 007 视觉验证拦截器（无 session 依赖）
         vision_agent = VisionSubAgent(config)
-
-        # Issue 015: Vision Session Manager
-        from harness.verification.session import VisionSessionManager, record_write
         _vision_session_mgr = VisionSessionManager(
             config, world_state=_cache,
             log_dir=config.log_dir,

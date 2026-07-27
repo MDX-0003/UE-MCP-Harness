@@ -46,7 +46,7 @@ class WorldState(BaseModel):
     dirty_toolsets: set[str] = Field(default_factory=set)
 
     pie_running: bool | None = None       # None = 未知（无直接数据源）
-    last_full_refresh: datetime | None = None
+    last_state_full_refresh: datetime | None = None
     last_vision_verdict: dict | None = None  # 007 验证闭环：最近一次视觉验证结果
 
     # Hard Boundary 指纹（ADR 0008）：上次 execute_hard_boundary() 获取的关卡指纹
