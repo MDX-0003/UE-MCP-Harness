@@ -10,7 +10,7 @@ import logging
 from typing import Callable, TYPE_CHECKING
 
 from harness.interceptor import ToolCallCompleted, ToolCallInterceptor
-from harness.state.normalize import normalize_tool_args, state_parse_ref_path  # P0-1: 共享参数归一化
+from harness.state.normalize import normalize_tool_args, ref_parse_path  # P0-1: 共享参数归一化
 
 if TYPE_CHECKING:
     from harness.state.models import WorldState
@@ -289,7 +289,7 @@ def _handle_get_class(cache: WorldState, event: ToolCallCompleted) -> None:
             if isinstance(rv, dict):
                 class_ref = rv.get("refPath", "")
                 if class_ref and nc.actor_name in cache.actors:
-                    class_name, _ = state_parse_ref_path(class_ref)
+                    class_name, _ = ref_parse_path(class_ref)
                     if class_name:
                         cache.actors[nc.actor_name].class_name = class_name
                         logger.debug("get_class 回填: %s → %s", nc.actor_name, class_name)

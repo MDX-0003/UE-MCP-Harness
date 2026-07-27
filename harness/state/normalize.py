@@ -86,7 +86,7 @@ def normalize_tool_args(short_name: str, args: dict) -> NormalizedCall:
         )
 
     # 3. 从 refPath 提取 actor_name 和 component_name
-    actor_name, component_name = state_parse_ref_path(ref_path)
+    actor_name, component_name = ref_parse_path(ref_path)
 
     return NormalizedCall(
         actor_name=actor_name,
@@ -98,7 +98,7 @@ def normalize_tool_args(short_name: str, args: dict) -> NormalizedCall:
 
 # ---- 辅助函数 ----
 
-def state_parse_ref_path(ref_path: str) -> tuple[str, str]:
+def ref_parse_path(ref_path: str) -> tuple[str, str]:
     """从 UE refPath 中提取 actor 名和组件名。
 
     refPath 格式示例：
@@ -208,7 +208,7 @@ def mcp_tool_short_name(full_name: str) -> str:
 # Issue 020: extract_short_name 别名已废止，直接使用 mcp_tool_short_name
 
 
-def state_parse_actor_names(result: str) -> list[str]:
+def ref_parse_actor_names(result: str) -> list[str]:
     """从 find_actors 返回值中解析 Actor 名称列表。
 
     合并旧 _parse_actor_list (refresher) 与 _extract_actor_names (server)
@@ -239,7 +239,7 @@ def state_parse_actor_names(result: str) -> list[str]:
                             data = json.loads(text)
                         except (json.JSONDecodeError, TypeError):
                             continue
-                        rv = _resolve_actor_list(data)
+                        rv = _ref_resolve_list(data)
                         if rv is not None:
                             return rv
         # 直接 dict 格式（向后兼容旧测试 mock）
@@ -249,12 +249,12 @@ def state_parse_actor_names(result: str) -> list[str]:
                 return [str(item) for item in val if item]
         rv = parsed.get("returnValue")
         if rv is not None:
-            inner = _resolve_actor_list(rv)
+            inner = _ref_resolve_list(rv)
             if inner is not None:
                 return inner
         # 内联 returnValue（非 content 路径，如旧测试）
         if "returnValue" in parsed:
-            inner = _resolve_actor_list(parsed)
+            inner = _ref_resolve_list(parsed)
             if inner is not None:
                 return inner
     if isinstance(parsed, list):
@@ -266,7 +266,7 @@ def state_parse_actor_names(result: str) -> list[str]:
             and not line.startswith("{")]
 
 
-def _resolve_actor_list(data: Any) -> list[str] | None:
+def _ref_resolve_list(data: Any) -> list[str] | None:
     """从 returnValue 解包后的数据中提取 actor 名列表。不属于此格式返回 None。"""
     if isinstance(data, dict) and "returnValue" in data:
         data = data["returnValue"]
@@ -278,7 +278,7 @@ def _resolve_actor_list(data: Any) -> list[str] | None:
             for obj in data:
                 ref = obj.get("refPath", "") if isinstance(obj, dict) else ""
                 if ref:
-                    actor_name, _ = state_parse_ref_path(ref)
+                    actor_name, _ = ref_parse_path(ref)
                     if actor_name:
                         names.append(actor_name)
             return names
@@ -287,6 +287,56 @@ def _resolve_actor_list(data: Any) -> list[str] | None:
         # 逗号分隔字符串
         return [n.strip() for n in data.split(",") if n.strip()]
     return None
+
+
+def ref_extract_full_paths(result: Any) -> list[str]:
+    """从 find_actors 返回值提取完整 refPath（不做短名截断）。
+
+    与 ref_parse_actor_names 的差别：保留 find_actors 返回的原始 refPath，
+    可直接用于后续 list_properties / get_properties 的 instance.refPath 参数。
+    ref_parse_actor_names 返回短名用于 display／State Cache；
+    本函数返回全路径用于 API 调用。
+
+    处理两种格式：
+      - MCP content 信封: {content: [{type:"text", text: "{\\"returnValue\\":[...]}"}]}
+      - 直接 JSON-RPC: {"returnValue": [{refPath: "..."}]}
+    """
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    if not isinstance(result, dict):
+        return []
+
+    # MCP content 信封：解包 content[0].text → 内层 JSON
+    data = result
+    content = result.get("content", [])
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text", "")
+                if text:
+                    try:
+                        data = json.loads(text)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    break
+
+    rv = data.get("returnValue") if isinstance(data, dict) else None
+    if not isinstance(rv, list):
+        return []
+
+    paths: list[str] = []
+    for obj in rv:
+        if isinstance(obj, dict):
+            ref = obj.get("refPath", "")
+            if ref:
+                paths.append(ref)
+        elif isinstance(obj, str):
+            paths.append(obj)
+    return paths
 
 
 # ---- class_name 推断 ----

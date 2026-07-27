@@ -1,0 +1,117 @@
+# 颜色诊断 Skill —— 症状→根因→修复优先级决策树
+#
+# 设计意图：LLM 在氛围匹配中发现颜色偏差时，容易陷入"逐个参数试错"。
+# 本 Skill 提供人类调参师的诊断经验——根据颜色偏差的*特征*判断最可能的根因，
+# 从而优先调整正确的参数，减少无效迭代。
+#
+# 触发：主要由 match-atmosphere Step 2.5 显式激活，用户直接提问时也可命中触发词。
+name: color-diagnostics
+description: "场景颜色诊断：根据偏色特征（蓝/橙/绿/洋红）判断根因（太阳角度/大气散射/后处理调色），按优先级给出修复建议。优先调光，后处理尽量不动。"
+triggers:
+  - "颜色诊断"
+  - "为什么颜色不对"
+  - "偏色原因"
+  - "色偏"
+  - "color diagnosis"
+tools_allowlist:
+  # 只读诊断——不修改场景
+  - "ObjectTools.get_properties"
+  - "ObjectTools.list_properties"
+  - "ActorTools.get_actor_transform"
+  - "SceneTools.find_actors"
+  - "EditorAppToolset.GetCameraTransform"
+  # 上下文切换
+  - "activate_skill"
+  - "deactivate_skill"
+steps: |
+  ## 颜色诊断决策树
+
+  当 match_reference 或 vision_screenshot 报告颜色不匹配时，
+  不要直接开始调参数。先用以下决策树判断**最可能的根因**。
+
+  ### Step D1 — 判断色偏类型
+
+  从 Vision 结果或 match_reference 的 MiMo 分析中识别色偏特征：
+
+  | 看到的偏色 | 最可能根因 | 次要可能 | 优先调什么 |
+  |:-----------|:-----------|:---------|:-----------|
+  | 全局偏蓝 / 偏冷 | 太阳高度角太高（DirectionalLight 或 SunSky 的 rotation） | 色温参数偏冷 | ① 降低太阳角度 ② 色温 |
+  | 全局偏橙 / 偏暖 | 太阳高度角太低 | 色温参数偏暖 | ① 升高太阳角度 ② 色温 |
+  | 偏绿 | PostProcess Tint 参数（绿-洋红轴） | — | 调 Tint（不是 Temperature） |
+  | 偏洋红 / 偏紫 | PostProcess Tint 参数 | — | 调 Tint（不是 Temperature） |
+  | 饱和度过高/过低 | PostProcess Global Saturation | SkyAtmosphere 散射强度 | ① Saturation ② 大气参数 |
+  | 阴影区偏蓝、高光正常 | SkyAtmosphere Rayleigh 散射 | Skylight 颜色 | ① Rayleigh ② Skylight |
+  | 整体发灰/发白 | 雾密度过高 或 体积云过厚 | 对比度不足 | ① 雾参数 ② 后处理 Contrast |
+
+  ### Step D2 — 区分"光照问题"还是"后处理问题"
+
+  关键判断：
+  - **散射能解释的偏色**（蓝天偏蓝、夕阳偏橙、阴影偏冷）→ 调光照/大气参数
+  - **散射无法解释的偏色**（正午却偏橙、全局统一色调偏移、绿色/洋红色偏）
+    → 这是后处理调色导致的，去查 PostProcess Volume 的 Color Grading 段
+
+  ### Step D3 — 按优先级修复
+
+  **核心原则：优先调光，后处理尽量不动。**
+
+  ⚠ **后处理与光源属性会互相影响。**
+  后处理的 Color Grading（Temperature/Tint/Saturation/Gamma）是对**最终渲染画面**的全局滤镜，
+  它会覆盖和掩盖前面所有组件（光源、大气、雾、云）的真实效果。
+  如果在光源尚未调对时就动后处理，你会陷入"用滤镜模拟光照"的陷阱：
+  后处理色温可以轻易让暖光画面"看起来"偏冷，但光源本身仍然是暖的——
+  后续微调光源时效果会被后处理扭曲，导致越调越乱。
+
+  **因此，调整顺序必须严格遵守：**
+
+  ```
+  第 1 位：DirectionalLight / SunSky（光源——场景所有颜色的物理来源）
+    ├── LightColor, Intensity, Rotation（太阳角度）
+    └── 确认光源色温与参考图方向一致后再进入下一步
+
+  第 2 位：SkyLight（环境光——填充阴影和天空反射）
+    ├── LightColor, Intensity
+    └── 配合 DirectionalLight 微调，不要动大幅度
+
+  第 3 位：SkyAtmosphere + VolumetricCloud（大气散射 + 云——受光源驱动）
+    ├── RayleighScattering, MieScattering, Absorption
+    └── 大气颜色由光源角度 + 散射参数共同决定，光源不对则大气永远不对
+
+  第 4 位：ExponentialHeightFog（雾——大气密度和颜色）
+    ├── FogDensity, FogInscatteringColor
+    └── 雾的视觉影响叠加在所有前面效果之上
+
+  第 5 位（最后手段）：PostProcess Volume（后处理——全局滤镜）
+    ├── Color Grading → Temperature（蓝↔橙）, Tint（绿↔洋红）
+    ├── Color Grading → Global Saturation, Contrast, Gamma
+    └── ⚠ 仅在前 4 位全部确认正确后才动后处理。
+        如果发现需要 postProcess 的 Temperature 偏移超过 ±2000K
+        或 Saturation 偏移超过 ±0.5 才能匹配参考图，
+        那不是后处理的问题——回去检查光源和大气参数。
+  ```
+
+  ### Step D4 — 诊断验证
+
+  调整怀疑的参数后，调 match_reference 或 vision_screenshot 验证：
+  - 量化指标（R/B 比值）向参考值收敛 → 诊断正确，继续
+  - 量化指标无明显变化 → 诊断可能错误，回到 D1 重新判断色偏类型
+  - 连续 2 轮同一参数无明显变化 → 排除该根因，尝试次要可能
+
+  ### 参数速查
+
+  | 参数 | 所在组件 | 影响 |
+  |:-----|:---------|:-----|
+  | LightColor | DirectionalLight, SkyLight, PointLight, SpotLight, RectLight | 光源颜色（RGB 或色温） |
+  | Intensity | 所有光源 | 光源亮度 |
+  | Rotation (Pitch) | DirectionalLight, SunSky | 太阳高度角——低=暖橙，高=冷蓝 |
+  | RayleighScattering | SkyAtmosphere | 大气散射颜色（蓝天/夕阳色） |
+  | MieScattering | SkyAtmosphere | 米氏散射（雾感/灰白感） |
+  | Temperature | PostProcess Volume → Color Grading | 蓝（低温）↔ 橙（高温） |
+  | Tint | PostProcess Volume → Color Grading | 绿（负值）↔ 洋红（正值） |
+  | Global Saturation | PostProcess Volume → Color Grading | 全局色彩饱和度 |
+  | FogDensity | ExponentialHeightFog | 雾的浓度 |
+  | FogInscatteringColor | ExponentialHeightFog | 雾的内散射颜色 |
+
+  ### 完成诊断后
+
+  调 `activate_skill("match-atmosphere")` 或 `activate_skill("scene-lighting")`
+  回到调整流程，用诊断结论指导 Step 3 的组件选择。

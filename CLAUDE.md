@@ -28,9 +28,10 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 | 020 | 命名规整：前缀+功能全面对齐 | ✅ (commit 9b8bb24) | docs/issues/020-naming-convention-alignment.md |
 | 021 | 周边修复：Bug 修复 + 死代码清理 + CLI/Config | ✅ (commit 9b8bb24) | docs/issues/021-bug-fixes-and-cleanup.md |
 | 022 | 文档同步：架构/契约/词汇表回标 | ✅ (commit 10acdc6) | docs/issues/022-documentation-sync.md |
+| 023 | 评价指标修复：直方图相似度结构性缺陷 | ❌ 待开发 | [docs/issues/023-evaluation-metrics-fix.md](docs/issues/023-evaluation-metrics-fix.md) |
 | — | LevelPersistenceToolset (fingerprint/dirty/save 五工具) | ✅ 直连验证通过 | UE 侧插件, `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset/`, 详见 docs/contracts.md §4 |
 
-**全量测试：384 passed + 4 skipped（2026-07-26，重构后基线）。12 个预存失败（test_stop_limit 8 + test_build_atmosphere_mapping 4）待下一轮修复。**
+**全量测试：384 passed + 4 skipped（2026-07-26，重构后基线）。12 个预存失败（test_stop_limit 8 + test_build_atmosphere_mapping 4）待下一轮修复。注意：test_build_atmosphere_mapping 的 4 个预存失败与 Issue 023 的 P0-1（build_atmosphere_mapping 全量 Parameter error）高度相关，很可能同一根因。**
 
 **当前方向（2026-07-26 更新）**：重构计划（`docs/plans/2026-07-24-harness-refactor.md`）Issues 017–021 已全部完成——server.py 从 ~1763 行缩减到 407 行（-77%），call_tool if 链消除，Import 环断开，命名规整，B2/B7 静默失效修复，`_is_screenshot_tool` 收敛。剩余：文档回标（Issue 022）+ 12 个预存测试修复。项目第一定位是求职/作品集叙事。UE 是世界状态唯一权威，WorldState 为带指纹校验的观测记录（ADR 0008）。UE 侧配套插件 LevelPersistenceToolset（七工具）位于 `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset`，已直连验证通过。
 

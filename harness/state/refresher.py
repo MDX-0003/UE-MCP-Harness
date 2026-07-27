@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from harness.state.normalize import state_parse_actor_names
+from harness.state.normalize import ref_parse_actor_names
 
 if TYPE_CHECKING:
     from harness.client import McpClientSession
@@ -48,7 +48,7 @@ async def state_full_refresh(
             "toolset_registry.toolsets.core.scene.SceneTools.find_actors",
             {"glob": "*"},
         )
-        actor_names = state_parse_actor_names(result)
+        actor_names = ref_parse_actor_names(result)
         for name in actor_names:
             if name not in cache.actors:
                 from harness.state.models import ActorSnapshot
@@ -66,7 +66,7 @@ async def state_full_refresh(
             "ToolsetRegistry.EditorAppToolset.GetSelectedActors",
             {},
         )
-        cache.selected_actors = state_parse_actor_names(result)
+        cache.selected_actors = ref_parse_actor_names(result)
     except Exception as e:
         logger.warning("获取选中 Actor 失败: %s", e)
 

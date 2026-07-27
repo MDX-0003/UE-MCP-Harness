@@ -84,7 +84,9 @@ def _build_instructions(skill_registry: "SkillRegistry") -> str:
     """组装 LLM 系统 instructions：标准验证流程 + 灯光 SOP + Skill 列表。"""
     skills = skill_registry.list_skills()
     if skills:
-        lines: list[str] = ["可用 Skill（用户提及触发词时自动激活对应 Skill）："]
+        lines: list[str] = [
+            "## Harness Skill 列表（调 activate_skill(\"<名称>\") 激活）："
+        ]
         for s in skills:
             lines.append(f"  - {s.name}: {s.description}")
             triggers_str = ", ".join(s.triggers)
@@ -96,6 +98,20 @@ def _build_instructions(skill_registry: "SkillRegistry") -> str:
     return (
         "你是 UE Editor Agent，通过 Harness 中间层连接 Unreal Engine 5.8。\n"
         "自由探索模式下可用约 20 个核心工具。\n"
+        "\n"
+        "## ⚠ 氛围匹配 / 参考图任务：必须先激活 Skill\n"
+        "\n"
+        "如果用户要求模仿参考图、匹配氛围、照着某张图调场景——\n"
+        "**你的第一个动作必须是调 activate_skill(\"match-atmosphere\")。**\n"
+        "这不是可选建议，是必须执行的入口。不激活 Skill 你将缺少：\n"
+        "  - 完整的 5 步调整工作流（含强制关闭后处理）\n"
+        "  - 颜色诊断决策树（color-diagnostics）\n"
+        "  - 正确的组件调整顺序（光源→大气→后处理）\n"
+        "\n"
+        "⚠ 不要在外部 skill search 里找——match-atmosphere 和 color-diagnostics 是\n"
+        "Harness 内置的 Skill，只通过 activate_skill() 激活，不会被任何外部 skill_search 索引到。\n"
+        "直接用 activate_skill(\"match-atmosphere\")。\n"
+        "如果需要在调参过程中诊断为什么颜色不对，调 activate_skill(\"color-diagnostics\")。\n"
         "\n"
         "## 场景修改后的标准验证流程\n"
         "修改任何 Actor 后，请按以下步骤验证效果：\n"

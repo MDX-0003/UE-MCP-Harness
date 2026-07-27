@@ -36,6 +36,7 @@ tools_allowlist:
   - "vision_reset"
   - "vision_status"
   - "deactivate_skill"
+  - "activate_skill"
 steps: |
   ## 参考图氛围匹配流程
 
@@ -51,13 +52,41 @@ steps: |
     注意: tag 为必填参数，传空字符串 "" 匹配所有 Tag（非类名匹配）。
           Actor 通常没有 Tag 组件，因此 tag="" 是常态。glob 做名称模糊匹配。
 
+  ### Step 1.5 — 关闭后处理 Volume（强制）
+
+  ⚠ **后处理是全局滤镜，会掩盖光源和大气参数的真实效果。**
+  在调整任何其他组件之前，必须先关闭 PostProcessVolume。
+
+  如果 Step 1 扫描到了 PostProcessVolume：
+    a. 调 get_properties(Volume的refPath, ["bEnabled"]) 获取当前 bEnabled 值
+    b. 调 set_properties(Volume的refPath, {bEnabled: false}) 关闭 Volume
+    c. 记住：最终完成时必须重新打开（Step 4）
+
+  如果未找到 PostProcessVolume：
+    a. 调 add_to_scene_from_class(actor_type="/Script/Engine.PostProcessVolume", name="PostProcessVolume_RefMatch")
+    b. 调 set_properties(新建Volume的refPath, {bEnabled: false})
+    c. 后续所有步骤在此新 Volume 关闭的状态下执行
+
   ### Step 2 — 加载参考图并对比
   调 match_reference("<path>")，返回 9 维度方向性差异清单 + 5 项量化指标。
   **记下色温 R/B 比值**——参考图和当前场景各有一个数。后续每轮调整都要对比这个值。
 
-  ### Step 3 — 逐组件调整（按此顺序：先独立，后联动）
+  ### Step 2.5 — 颜色诊断（match_reference 报告颜色偏差时必须执行）
+  **不要跳过这一步直接调参数。** 如果 match_reference 的 MiMo 分析或量化指标
+  显示颜色偏差（色温/色调偏移/饱和度任意一项偏离），
+  调 `activate_skill("color-diagnostics")` 获取诊断决策树，
+  根据偏色**特征**（偏蓝/偏橙/偏绿/偏洋红）判断最可能的根因。
+  诊断完成后调 `activate_skill("match-atmosphere")` 回到本流程，用诊断结论指导 Step 3。
+  如果颜色指标全部接近参考值，可跳过此步直接进入 Step 3。
+
+  ### Step 3 — 逐组件调整（严格按此顺序）
   从 match_reference 的差异清单和 Step 1 的映射表中，确定要调的组件和属性。
-  **调整顺序很重要：** 先调独立组件（雾、体积云），再调会"染色"全局的组件（天空大气、方向光）。
+  **调整顺序不可调换——后调的组件受先调组件影响，乱序会导致收敛失败：**
+  1. DirectionalLight / SunSky（光源——所有颜色的物理来源）
+  2. SkyLight（环境光）
+  3. SkyAtmosphere + VolumetricCloud（大气散射 + 云——受光源驱动）
+  4. ExponentialHeightFog（雾——叠加在前述效果之上）
+  ⚠ PostProcessVolume 已在 Step 1.5 关闭，此时不调整。
 
   对每个组件：
     a. 调 get_properties 获取当前值
@@ -69,7 +98,14 @@ steps: |
        - R/B 比值偏离参考值 → 方向错误，反向调整，回到 b
        - 指标无明显变化 → 换属性或加大幅度，回到 b
 
-  ### Step 4 — 整体确认
+  ### Step 4 — 恢复后处理 + 整体确认
+
+  **如果 Step 1.5 关闭了 PostProcessVolume：**
+    a. 调 set_properties(Volume的refPath, {bEnabled: true}) 恢复 Volume
+    b. 此时才允许微调 postProcess 参数（Temperature/Tint/Saturation）
+    c. ⚠ 微调边界：Temperature 偏移不超过 ±2000K，Saturation 不超过 ±0.5
+       如果超过 → 不是后处理的问题，回到 Step 3 检查光源和大气参数
+
   全部组件调整完成且量化指标接近参考值后，调 vision_screenshot 确认整体效果。
   如仍有偏差，回到 Step 3 微调。
 

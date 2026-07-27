@@ -497,6 +497,13 @@ async def handle_match_reference(ctx: ToolContext, arguments: dict) -> CallToolR
     body_lines.append("")
     body_lines.append("---")
     body_lines.append("")
+    body_lines.append(
+        "⚠ **必须先调 activate_skill('match-atmosphere')** "
+        "获取完整的 5 步匹配工作流（含强制关闭后处理、正确的调整顺序、颜色诊断决策树）。"
+        "在激活 Skill 之前不要手动调整场景参数——你会跳过关键的 Step 1.5（关闭后处理 Volume），"
+        "导致后处理掩盖光源的真实效果。"
+    )
+    body_lines.append("")
     if is_first:
         body_lines.append(
             "在存在参考图的任务里，每轮迭代请使用 "

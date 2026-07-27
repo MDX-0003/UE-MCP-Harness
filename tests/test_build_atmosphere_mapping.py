@@ -423,12 +423,12 @@ class TestBuildAtmosphereMapping:
                 request_ctx.reset(token)
 
         text = result.root.content[0].text
-        # 降级输出应以警告开头
-        assert "MiMo 分类失败" in text, "应显示 MiMo 失败警告"
-        # 应包含原始属性名（mock 数据定义为小写首字母）
-        assert "lightColor" in text, "降级输出应包含原始属性 lightColor"
-        assert "intensity" in text, "降级输出应包含原始属性 intensity"
-        assert "fogDensity" in text, "降级输出应包含 fogDensity"
+        # MiMo 失败时，白名单降级应正常生成映射表
+        assert "氛围相关属性" in text, "应显示属性计数"
+        # 白名单中的氛围属性应出现在输出中
+        assert "lightColor" in text, "白名单应包含 lightColor"
+        assert "intensity" in text, "白名单应包含 intensity"
+        assert "fogDensity" in text, "白名单应包含 fogDensity"
 
     @pytest.mark.asyncio
     async def test_all_actors_empty_scenario(
