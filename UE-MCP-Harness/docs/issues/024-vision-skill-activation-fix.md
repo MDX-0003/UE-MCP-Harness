@@ -9,8 +9,9 @@
 | # | 修复项 | 类型 | 状态 |
 |:--|:-----|:-----|:---:|
 | R1 | color-diagnostics 无条件强制激活 | Skill/Prompt | ⬜ |
-| R2 | vision_screenshot 格式化提问模板 | 新功能 | ⬜ |
-| R3 | match_reference 引导措辞修正 | 措辞修改 | ⬜ |
+| R2 | match_reference 引导措辞修正（明确禁止 vision_screenshot 用于氛围对比） | 措辞修改 | ⬜ |
+| — | ~~vision_screenshot 格式化提问模板~~ | 暂缓 | 只要 match_reference 优先于 vision_screenshot，模板化提问无必要。未来如需要则走 Harness 端强制注入（非 Skill Prompt）。 |
+| — | 映射表属性去重 | Bug | ⬜ |
 | — | 映射表属性去重 | Bug | ⬜ |
 
 ---
@@ -112,56 +113,35 @@ vision_screenshot（不是 vision_ask）。LLM 的行为是合理的——它读
 - `skills/match-atmosphere.yaml` — Step 0 + Step 2.5
 - `harness/cli.py` — `_build_instructions` Skill 列表标题可追加提示
 
-### 3.2 R2: vision_screenshot 格式化提问模板
+### 3.2 R2: match_reference 优先级绝对化——明确禁止 vision_screenshot 用于氛围对比
 
-**在 Harness 端预定义一套结构化模板——LLM 调用 vision_screenshot 时
-自动注入标准提问格式。**
+**问题**：match_reference 当前说 "不要用 vision_ask 做氛围对比"，
+LLM 认为 vision_screenshot ≠ vision_ask，所以用 vision_screenshot 替代
+match_reference 做验证。
 
-方案：在 `build_scene_context` 或 `vision_screenshot` handler 中，
-当检测到当前 Session 是氛围匹配模式（skill 为 match-atmosphere 时），
-在 question 上自动追加标准维度的检查项：
+**策略**：不需要给 vision_screenshot 写模板化提问——只要保证
+match_reference 的优先级是绝对的，LLM 就不会用 vision_screenshot
+做氛围判断。vision_screenshot 的正确用途是 match_reference 确认
+收敛方向后的视觉确认（Step 4），而非替代量化对比。
+
+**改 1**：match_reference 输出中的现有语句
+"不要用 vision_ask 做氛围对比" → 扩展为：
 
 ```
-[Vision 提问格式]
-当 Skill 为 match-atmosphere 时，vision_screenshot 的 question 应包含：
-  1. 整体色调判定（冷/暖/中性）
-  2. 天空颜色描述（渐变方向、主色调）
-  3. 光源特征（颜色、强度、方向）
-  4. 雾气/大气效果（密度、颜色）
-  5. 与上一轮的视觉差异（如有）
-  6. 与参考图的差距方向（更接近/更远离）
+⚠ 在存在参考图的任务里，match_reference 是氛围对比的**唯一工具**。
+  - 每轮调整后必须先调 match_reference 看量化指标（R/B、亮度、饱和度、直方图）
+  - 不要用 vision_screenshot 或 vision_ask 判断氛围变化
+  - vision_screenshot 仅用于非参考图任务的视觉验证，或 match_reference
+    确认收敛方向后的最终视觉确认（Step 4）
 ```
 
-实现方式有两种选择：
-
-**A. 纯 Prompt 注入**（推荐）——在 match-atmosphere Skill 的 steps 中
-添加一段视力提问模板。LLM 读 Skill 时自然学到如何构造好问题。
-不需要改 Python 代码。
-
-**B. Harness 端自动注入**——在 vision_screenshot handler 中检测
-活跃 Skill，自动 append 模板到 question。更可靠但侵入性更大。
-
-先走方案 A。在 match-atmosphere Skill 的 Step 3 和 Step 4 的提到
-vision_screenshot 处，追加模板说明。
-
-**涉及文件**：
-- `skills/match-atmosphere.yaml` — 追加 vision_screenshot 提问模板
-
-### 3.3 R3: match_reference 引导措辞精确化
-
-**改 1**：match_reference 输出中 "不要用 vision_ask 做氛围对比"
-→ "每轮调整后用 match_reference 做量化对比——不要用 vision_screenshot
-或 vision_ask 判断氛围变化。vision_screenshot 仅用于非参考图任务
-的视觉验证。"
-
-**改 2**：在 `在存在参考图的任务里，每轮迭代请使用 match_reference(...)`
-段后追加 "调整后先调 match_reference 看量化指标，确认收敛方向后再用
-vision_screenshot 做视觉确认。"
+**改 2**：在 "在存在参考图的任务里，每轮迭代请使用 match_reference(...)"
+之前插入行动顺序提示。
 
 **涉及文件**：
 - `harness/verification/reference.py` — match_reference 输出模板
 
-### 3.4 附加: 映射表属性去重
+### 3.3 附加: 映射表属性去重
 
 `_classify_by_whitelist` 中，同一属性被多次匹配到同一维度时应去重。
 在添加到 result[dim] 之前检查是否已存在同名同 refPath 的条目。
@@ -173,16 +153,15 @@ vision_screenshot 做视觉确认。"
 
 ## 4. Implementation Decisions
 
-1. **R1 优先于 R2/R3**：color-diagnostics 强制激活是基础——没有诊断框架，
-   再好的提问模板和引导也无法阻止 LLM 的试错调整。
+1. **R1 和 R2 都只涉及文本修改**：R1 改三个 Prompt/YAML 文件，
+   R2 只改 match_reference 输出模板。都是措辞层面的修复，不涉及逻辑改动。
 
-2. **R2 走纯 Prompt 方案（方案 A）**：在 match-atmosphere Skill 中嵌入
-   vision_screenshot 提问模板。不入代码——模板内容本质上是 Skill 知识，
-   应随 Skill 版本迭代。
+2. **vision_screenshot 模板化提问暂不纳入**：只要 R2 保证了 match_reference
+   的绝对优先级，LLM 不会误用 vision_screenshot 做氛围对比。vision_screenshot
+   的用途退化为"非参考图任务的视觉验证"和"match_reference 确认后的视觉确认"——
+   在这两种用途下，简单的是非题可以满足需求。
 
-3. **三个 R 可并行**：互不依赖，各自修改独立文件。
-
-4. **R1 的三处改动形成一个闭环**：
+3. **R1 的三处改动形成一个闭环**：
    - SystemContextProvider（get_context）→ 初次连接时告知
    - match-atmosphere Step 0 → 激活 Skill 时看到
    - Step 2.5 → 执行时的二次确认
@@ -202,10 +181,9 @@ vision_screenshot 做视觉确认。"
 
 ## 6. Out of Scope
 
-- 不修改 vision_screenshot handler 的 Python 逻辑（走纯 Prompt 方案）
-- 不在 build_atmosphere_mapping 中增加 PostProcessVolume 的 settings 子属性解析
-  （那是白名单完善，不是本 Issue 范围）
-- 不改变 match_reference 的 countdown 机制
+- **不修改 vision_screenshot 的任何逻辑或模板**
+- **不在 match-atmosphere Skill 中嵌入 vision_screenshot 提问模板**
+  （vision_screenshot 的使用由 R2 的 match_reference 优先级规则控制）
 
 ---
 
