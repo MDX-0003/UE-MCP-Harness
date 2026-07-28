@@ -506,9 +506,24 @@ async def handle_match_reference(ctx: ToolContext, arguments: dict) -> CallToolR
     body_lines.append("")
     if is_first:
         body_lines.append(
+            "⚠ match_reference 是氛围对比的**唯一工具**：\n"
+            "- 每轮调整后必须先调 match_reference 看量化指标\n"
+            "- **不要用 vision_screenshot 或 vision_ask 判断氛围变化**\n"
+            "- vision_screenshot 仅用于: (1) 非参考图任务的视觉验证，\n"
+            "  或 (2) match_reference 确认收敛方向后的最终视觉确认\n"
+            "- 氛围对比走 match_reference，视觉确认走 vision_screenshot——\n"
+            "  两者不可互换。"
+        )
+        body_lines.append("")
+        body_lines.append(
             "在存在参考图的任务里，每轮迭代请使用 "
-            f"match_reference(\"{ref_path_str}\") 获取对比反馈，"
-            "不要用 vision_ask 做氛围对比。"
+            f"match_reference(\"{ref_path_str}\") 获取对比反馈。"
+        )
+        body_lines.append("")
+    else:
+        body_lines.append(
+            "每轮调整后必须先调 match_reference 看量化指标。"
+            "不要用 vision_screenshot 或 vision_ask 替代。"
         )
         body_lines.append("")
     body_lines.append(

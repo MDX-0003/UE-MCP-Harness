@@ -368,16 +368,24 @@ def _classify_by_whitelist(property_index: list[dict]) -> dict[str, list[dict]]:
     属性名在白名单中 → 归入对应维度。
     """
     result: dict[str, list[dict]] = {dim: [] for dim in ATMOSPHERE_WHITELIST}
+    seen: dict[str, set[tuple[str, str]]] = {
+        dim: set() for dim in ATMOSPHERE_WHITELIST
+    }
     for entry in property_index:
         prop = entry.get("property", "")
+        ref = entry.get("refPath", "")
         if not prop:
             continue
         for dim, names in ATMOSPHERE_WHITELIST.items():
             if prop in names:
+                key = (ref, prop)
+                if key in seen[dim]:
+                    continue
+                seen[dim].add(key)
                 result[dim].append({
                     "actor_type": entry["actor_type"],
                     "actor_name": entry["actor_name"],
-                    "refPath": entry["refPath"],
+                    "refPath": ref,
                     "property": prop,
                 })
     # 删除空维度
