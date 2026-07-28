@@ -28,8 +28,11 @@ MCP 中间层，连接 LLM (Claude/GPT) 与 Unreal Engine 5.8 编辑器。对外
 | 020 | 命名规整：前缀+功能全面对齐 | ✅ (commit 9b8bb24) | docs/issues/020-naming-convention-alignment.md |
 | 021 | 周边修复：Bug 修复 + 死代码清理 + CLI/Config | ✅ (commit 9b8bb24) | docs/issues/021-bug-fixes-and-cleanup.md |
 | 022 | 文档同步：架构/契约/词汇表回标 | ✅ (commit 10acdc6) | docs/issues/022-documentation-sync.md |
-| 023 | 评价指标修复：直方图相似度结构性缺陷 | ❌ 待开发 | [docs/issues/023-evaluation-metrics-fix.md](docs/issues/023-evaluation-metrics-fix.md) |
+| 023 | 评价指标修复：直方图相似度结构性缺陷 | ❌ P0-1/P2-1/P2-2 done, P0-2 作废 | [docs/issues/023-evaluation-metrics-fix.md](docs/issues/023-evaluation-metrics-fix.md) |
+| 024 | Vision 提问质量 + Skill 强制激活 + match_reference 引导 | ❌ 待开发 | [docs/issues/024-vision-skill-activation-fix.md](docs/issues/024-vision-skill-activation-fix.md) |
 | — | LevelPersistenceToolset (fingerprint/dirty/save 五工具) | ✅ 直连验证通过 | UE 侧插件, `{UE_PROJECT_ROOT}/MCP/Plugins/LevelPersistenceToolset/`, 详见 docs/contracts.md §4 |
+
+**2026-07-28 更新**：Issue 023 P0-1(全量 Parameter error) ✅ 修复，含 `ref_extract_full_paths` MCP 信封解包 + `_parse_property_names` JSON dict 格式 + refPath 截断修复。P2-1(match_reference Skill 激活引导) ✅、P2-2(color-diagnostics Step D3 强化) ✅。P0-2 作废(State Cache 不存 LightColor)。新增 Issue 024(LLM Vision 提问质量 + Skill 强制激活)。
 
 **全量测试：384 passed + 4 skipped（2026-07-26，重构后基线）。12 个预存失败（test_stop_limit 8 + test_build_atmosphere_mapping 4）待下一轮修复。注意：test_build_atmosphere_mapping 的 4 个预存失败与 Issue 023 的 P0-1（build_atmosphere_mapping 全量 Parameter error）高度相关，很可能同一根因。**
 
